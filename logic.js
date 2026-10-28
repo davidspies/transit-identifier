@@ -78,7 +78,7 @@
       for (const e of dest.estimate || []) {
         if (!estMatchesRoute(dest.abbreviation, e, route)) continue;
         const m = e.minutes === "Leaving" ? 0 : parseInt(e.minutes, 10);
-        if (!Number.isNaN(m)) out.push({ minutes: m, cars: +e.length || null, destName: dest.destination });
+        if (!Number.isNaN(m)) out.push({ minutes: m, cars: +e.length || null, destName: dest.destination, destAbbr: dest.abbreviation });
       }
     }
     return out.sort((a, b) => a.minutes - b.minutes);

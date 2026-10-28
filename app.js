@@ -19,7 +19,9 @@
     etd: null, etdAt: 0, etdErr: null,
     vehicles: null, vehAt: 0, ctErr: null,
     visits: null, visitsAt: 0,
-    lock: null,          // {sys:'bart', routeId} | {sys:'ct', train}
+    lock: null,          // {sys:'bart', routeId, eta} | {sys:'ct', train}
+    plan: [],            // planned transfers: [{at: stationKey, sys, routeId|train, eta}]
+    picker: null,        // {seg, key, tArr} while choosing a transfer
     lastResult: null,
     geoErr: null,
     started: false,
@@ -160,7 +162,8 @@
       if (wantCt && cur) jobs.push(refreshVehicles(force));
       await Promise.all(jobs);
       if (cur) S.lastResult = decide(cur, prevFix(cur));
-      if (S.lastResult?.sys === "ct" && S.lastResult.vehicle && S.lastResult.vehicle.calls.length < 2) {
+      const needVisits = S.plan.some((l) => l.sys === "ct") || (S.lastResult?.sys === "ct" && S.lastResult.vehicle && S.lastResult.vehicle.calls.length < 2);
+      if (needVisits && S.key511) {
         await refreshVisits(force);
         S.lastResult = decide(cur, prevFix(cur));
       }
@@ -205,9 +208,9 @@
         if (c.rank > 0) return "Second train on this line";
         return "Another line on this track";
       };
-      const stops = TI.bartStops(top, { ...S.bart, etd: S.etd }).map((s) => ({ name: s.name, time: S.etdAt + s.minutes * 60e3, estimated: s.estimated }));
+      const stops = TI.bartStops(top, { ...S.bart, etd: S.etd }).map((s) => ({ key: s.abbr, name: s.name, time: S.etdAt + s.minutes * 60e3, estimated: s.estimated }));
       return {
-        sys: "bart", fix: cur, direction: bart.direction, stops,
+        sys: "bart", ident: { sys: "bart", routeId: top.route.routeID }, fix: cur, direction: bart.direction, stops,
         title: `${titleCase(top.route.color)} line to ${S.bart.stations[top.route.destination]?.name || top.route.destination}`,
         sub: [top.cars ? `${top.cars}-car train` : null, top.atStation ? "Stopped at station" : null].filter(Boolean).join(" · "),
         color: top.route.hexcolor, plausible: top.plausible,
@@ -223,10 +226,10 @@
       const v = ct.candidates[0];
       let calls = v.calls;
       if (calls.length < 2 && S.visits?.[v.train]) calls = S.visits[v.train];
-      const stops = calls.filter((c) => c.time > Date.now() - 60e3).map((c) => ({ name: c.name, time: c.time, estimated: false }));
+      const stops = calls.filter((c) => c.time > Date.now() - 60e3).map((c) => ({ key: "ct:" + c.name, name: c.name, time: c.time, estimated: false }));
       const dirWord = v.dir === "N" ? "Northbound" : v.dir === "S" ? "Southbound" : "";
       return {
-        sys: "ct", fix: cur, direction: ct.direction, stops, vehicle: v,
+        sys: "ct", ident: { sys: "ct", train: v.train }, fix: cur, direction: ct.direction, stops, vehicle: v,
         title: `Caltrain ${v.train}`,
         sub: [dirWord, v.line, v.dest ? `to ${TI.cleanStop(v.dest)}` : null].filter(Boolean).join(" · "),
         color: "#c8102e", plausible: v.d < 800,
@@ -248,7 +251,123 @@
     return { sys: null, fix: cur, nearest };
   }
 
+  // ---------- Transfers ----------
+  // Station keys: BART abbreviation ("MCAR") or "ct:<name>" for Caltrain. Millbrae links the two.
+  const bartAbbrOf = (key) => (key.startsWith("ct:") ? (key === "ct:Millbrae" ? "MLBR" : null) : key);
+  const ctNameOf = (key) => (key.startsWith("ct:") ? key.slice(3) : key === "MLBR" ? "Millbrae" : null);
+  const bartDestName = (abbr) => S.bart?.stations[abbr]?.name || abbr;
+
+  // Is this a station where BART lines split or meet (so a transfer makes sense)?
+  function isTransferStation(key, ident) {
+    if (key === "MLBR" || key === "ct:Millbrae") return true;
+    if (key.startsWith("ct:") || !S.bart) return false;
+    const mine = S.bart.routes.find((r) => r.routeID === ident?.routeId);
+    const nb = (r) => { const i = r.stations.indexOf(key); return i < 0 ? null : [r.stations[i - 1], r.stations[i + 1]].sort().join(); };
+    const myNb = mine ? nb(mine) : null;
+    return S.bart.routes.some((r) => r !== mine && r.stations.includes(key) && nb(r) !== myNb &&
+      !(mine && r.hexcolor === mine.hexcolor && r.direction !== mine.direction));
+  }
+
+  function bartLegStops(route, abbr, minutes) {
+    const idx = route.stations.indexOf(abbr);
+    return TI.bartStops({ route, nextIdx: idx, minutesToNext: minutes }, { ...S.bart, etd: S.etd })
+      .slice(1).map((s) => ({ key: s.abbr, name: s.name, time: S.etdAt + s.minutes * 60e3, estimated: s.estimated }));
+  }
+
+  // Trains leaving station `key` at or after `tArr`, excluding the train you're on (`ident`).
+  function transferOptions(key, tArr, ident) {
+    const out = [], seen = new Set();
+    const abbr = bartAbbrOf(key), ctName = ctNameOf(key);
+    if (abbr && S.bart && S.etd) {
+      const mine = S.bart.routes.find((r) => r.routeID === ident?.routeId);
+      for (const r of S.bart.routes) {
+        const i = r.stations.indexOf(abbr);
+        if (i < 0 || i === r.stations.length - 1) continue;
+        if (ident?.sys === "bart" && (r.routeID === ident.routeId || (mine && r.hexcolor === mine.hexcolor))) continue;
+        let n = 0;
+        for (const e of TI.etdFor(S.etd, abbr, r)) {
+          const t = S.etdAt + e.minutes * 60e3;
+          // BART holds connecting trains for timed transfers, and ETDs are whole-minute
+          // departure estimates, so a connection can read the same minute or up to 2 earlier than yours.
+          const slack = ident?.sys === "bart" ? 2.5 * 60e3 : 60e3;
+          if (t < tArr - slack) continue;
+          const dk = `${r.hexcolor}|${e.destAbbr}|${e.minutes}`;
+          if (seen.has(dk)) continue;
+          seen.add(dk);
+          out.push({ sys: "bart", routeId: r.routeID, at: abbr, eta: t, time: t, color: r.hexcolor,
+            label: `${titleCase(r.color)} to ${e.destName || bartDestName(r.destination)}`, cars: e.cars });
+          if (++n >= 2) break;
+        }
+      }
+    }
+    if (ctName && S.visits) {
+      for (const [train, list] of Object.entries(S.visits)) {
+        if (ident?.sys === "ct" && train === ident.train) continue;
+        const i = list.findIndex((s) => s.name === ctName);
+        if (i < 0 || i === list.length - 1 || list[i].time < tArr - 60e3) continue;
+        out.push({ sys: "ct", train, at: "ct:" + ctName, eta: list[i].time, time: list[i].time, color: "#c8102e",
+          label: `Caltrain ${train} to ${list[list.length - 1].name}` });
+      }
+    }
+    return out.sort((a, b) => a.time - b.time).slice(0, 8);
+  }
+
+  // Re-find a planned connection in the latest data. Returns a segment or null.
+  function resolveLeg(leg) {
+    if (leg.sys === "bart") {
+      const r = S.bart?.routes.find((x) => x.routeID === leg.routeId);
+      if (!r || !S.etd) return null;
+      const ests = TI.etdFor(S.etd, leg.at, r);
+      if (!ests.length) return null;
+      const best = ests.reduce((a, b) => (Math.abs(S.etdAt + b.minutes * 60e3 - leg.eta) < Math.abs(S.etdAt + a.minutes * 60e3 - leg.eta) ? b : a));
+      leg.eta = S.etdAt + best.minutes * 60e3;
+      return { ident: { sys: "bart", routeId: r.routeID }, color: r.hexcolor, title: `${titleCase(r.color)} to ${bartDestName(r.destination)}`,
+        depart: leg.eta, stops: bartLegStops(r, leg.at, best.minutes) };
+    }
+    const list = S.visits?.[leg.train];
+    const name = leg.at.slice(3);
+    const i = list ? list.findIndex((s) => s.name === name) : -1;
+    if (i < 0) return null;
+    leg.eta = list[i].time;
+    return { ident: { sys: "ct", train: leg.train }, color: "#c8102e", title: `Caltrain ${leg.train}`, depart: leg.eta,
+      stops: list.slice(i + 1).map((s) => ({ key: "ct:" + s.name, name: s.name, time: s.time, estimated: false })) };
+  }
+
+  const sameTrain = (a, b) => a && b && a.sys === b.sys && (a.sys === "bart" ? a.routeId === b.routeId : a.train === b.train);
+
+  // Current train plus any planned connections, as a list of segments.
+  function itinerary(r) {
+    // Once you've boarded a planned connection, it becomes the current train.
+    while (S.plan.length && sameTrain(S.plan[0], r.ident)) S.plan.shift();
+    const segs = [{ ident: r.ident, color: r.color, title: r.title, stops: r.stops }];
+    for (const leg of S.plan) {
+      const last = segs[segs.length - 1];
+      const idx = last.stops.findIndex((s) => s.key === leg.at || (!!bartAbbrOf(s.key) && bartAbbrOf(s.key) === bartAbbrOf(leg.at)));
+      if (idx < 0) break;
+      const res = resolveLeg(leg);
+      if (!res) { last.missing = last.stops[idx].name; break; }
+      last.stops = last.stops.slice(0, idx + 1);
+      last.change = { at: last.stops[idx].name, arrive: last.stops[idx].time, depart: res.depart };
+      segs.push(res);
+    }
+    return segs;
+  }
+
+  async function openPicker(seg, key, tArr) {
+    S.picker = { seg, key, tArr };
+    render();
+    // Caltrain connections need stop predictions for every train.
+    if (ctNameOf(key) && S.key511 && Date.now() - S.visitsAt > 60e3) { await refreshVisits(true); render(); }
+  }
+
   // ---------- Render ----------
+  // Gap between your train and a connection, both as whole-minute estimates.
+  function waitText(ms, bothBart) {
+    const m = Math.round(ms / 60e3);
+    if (bothBart && m <= 1) return "timed transfer";
+    if (m <= 0) return "tight connection";
+    return `${m} min wait`;
+  }
   const titleCase = (s) => (s || "").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
   const clock = (t) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const inMin = (t) => { const m = Math.round((t - Date.now()) / 60e3); return m <= 0 ? "now" : `${m} min`; };
@@ -283,12 +402,46 @@
     if (!r.plausible) warn.push("Low confidence: no train is clearly next on your stretch of track.");
     if (r.posAge > 180) warn.push(`Train position is ${Math.round(r.posAge / 60)} min old.`);
 
-    const rows = r.stops.map((s, i) => `
-      <li class="stop${i === 0 ? " next" : ""}">
-        <span class="dot" aria-hidden="true"></span>
-        <span class="name">${esc(s.name)}${i === 0 ? `<small>Next stop</small>` : ""}</span>
-        <span class="when"><b>${s.estimated ? "~" : ""}${clock(s.time)}</b><small>${s.estimated ? "est. " : ""}${inMin(s.time)}</small></span>
-      </li>`).join("");
+    const segs = itinerary(r);
+    const pk = S.picker;
+    const pickerHtml = (si, s) => {
+      const opts = transferOptions(s.key, s.time, segs[si].ident);
+      const loadingCt = ctNameOf(s.key) && S.key511 && !S.visits;
+      return `<li class="picker"><div>
+        <p class="eyebrow">Connections at ${esc(s.name)} · you arrive ${clock(s.time)}</p>
+        ${opts.length ? opts.map((o, i) => {
+          return `<button class="alt opt" data-o="${i}" style="--line:${esc(o.color)}"><span class="swatch"></span><span>${esc(o.label)}<small>Leaves ${clock(o.time)} · ${waitText(o.time - s.time, o.sys === "bart" && segs[si].ident?.sys === "bart")}${o.cars ? ` · ${o.cars} cars` : ""}</small></span><span class="pick">Take</span></button>`;
+        }).join("") : `<p class="muted small">${loadingCt ? "Loading Caltrain times…" : ctNameOf(s.key) && !S.key511 ? "Add a 511 key in Settings to see Caltrain connections." : "No connecting trains in the live data right now."}</p>`}
+        <button class="btn" id="pickcancel" type="button">Cancel</button>
+      </div></li>`;
+    };
+    let pickerOpts = null;
+    const segHtml = segs.map((seg, si) => {
+      const rows = seg.stops.map((s, i) => {
+        const isNext = si === 0 && i === 0;
+        const isChange = seg.change && i === seg.stops.length - 1;
+        const xfer = !isChange && isTransferStation(s.key, seg.ident);
+        const open = pk && pk.seg === si && pk.key === s.key;
+        if (open) pickerOpts = transferOptions(s.key, s.time, seg.ident);
+        return `
+        <li class="stop${isNext ? " next" : ""}${open ? " open" : ""}">
+          <span class="dot" aria-hidden="true"></span>
+          <button class="name stopbtn" type="button" data-seg="${si}" data-key="${esc(s.key)}" data-t="${s.time}" aria-expanded="${open}">
+            <span>${esc(s.name)}${xfer ? ` <span class="tag">${s.key === "MLBR" ? "Caltrain" : s.key === "ct:Millbrae" ? "BART" : "Transfer"}</span>` : ""}</span>
+            ${isNext ? `<small>Next stop</small>` : isChange ? `<small>Get off here</small>` : ""}
+          </button>
+          <span class="when"><b>${s.estimated ? "~" : ""}${clock(s.time)}</b><small>${s.estimated ? "est. " : ""}${inMin(s.time)}</small></span>
+        </li>${open ? pickerHtml(si, s) : ""}`;
+      }).join("");
+      const change = seg.change ? `
+        <div class="change" style="--line:${esc(segs[si + 1].color)}">
+          <span>Change at <strong>${esc(seg.change.at)}</strong> · ${waitText(seg.change.depart - seg.change.arrive, seg.ident?.sys === "bart" && segs[si + 1].ident?.sys === "bart")}</span>
+          <button class="linkbtn" data-unplan="${si}" type="button">Remove</button>
+        </div>
+        <div class="train leg" style="--line:${esc(segs[si + 1].color)}"><p class="eyebrow">Then</p><h3>${esc(segs[si + 1].title)}</h3><p class="sub">Leaves ${clock(seg.change.depart)}</p></div>` : "";
+      const missing = seg.missing ? `<p class="warn">Your planned connection at ${esc(seg.missing)} isn't in the live data right now.</p>` : "";
+      return `${seg.stops.length ? `<ol class="stops" style="--line:${esc(seg.color)}">${rows}</ol>` : ""}${missing}${change}`;
+    }).join("");
 
     card.innerHTML = `
       <div class="train" style="--line:${esc(r.color)}">
@@ -300,12 +453,26 @@
         </div>
       </div>
       ${warn.map((w) => `<p class="warn">${esc(w)}</p>`).join("")}
-      ${r.stops.length ? `<ol class="stops" style="--line:${esc(r.color)}">${rows}</ol>` : `<p class="muted">No upcoming stop times available for this train yet.</p>`}
+      ${r.stops.length ? `<p class="hint muted small">Tap a station to plan a transfer there.</p>${segHtml}` : `<p class="muted">No upcoming stop times available for this train yet.</p>`}
       ${r.alts?.length ? `<div class="alts"><p class="eyebrow">Other possibilities</p>${r.alts.map((a, i) => `<button class="alt" data-i="${i}" style="--line:${esc(a.color)}"><span class="swatch"></span><span><span class="why">${esc(a.why)}</span>${esc(a.label)}<small>${esc(a.detail)}</small></span><span class="pick">Switch</span></button>`).join("")}</div>` : ""}
     `;
     $("#lock")?.addEventListener("click", () => { S.lock = r.lockKey; tick(); });
     $("#unlock")?.addEventListener("click", () => { S.lock = null; tick(); });
-    card.querySelectorAll(".alt").forEach((b) => b.addEventListener("click", () => { S.lock = r.alts[+b.dataset.i].lock; tick(); }));
+    card.querySelectorAll(".alt:not(.opt)").forEach((b) => b.addEventListener("click", () => { S.lock = r.alts[+b.dataset.i].lock; tick(); }));
+    card.querySelectorAll(".stopbtn").forEach((b) => b.addEventListener("click", () => {
+      const seg = +b.dataset.seg, key = b.dataset.key;
+      if (S.picker && S.picker.seg === seg && S.picker.key === key) { S.picker = null; render(); return; }
+      openPicker(seg, key, +b.dataset.t);
+    }));
+    $("#pickcancel")?.addEventListener("click", () => { S.picker = null; render(); });
+    card.querySelectorAll(".opt").forEach((b) => b.addEventListener("click", () => {
+      const o = pickerOpts[+b.dataset.o];
+      const leg = o.sys === "bart" ? { sys: "bart", at: o.at, routeId: o.routeId, eta: o.eta } : { sys: "ct", at: o.at, train: o.train, eta: o.eta };
+      S.plan = S.plan.slice(0, S.picker.seg).concat([leg]);
+      S.picker = null;
+      render();
+    }));
+    card.querySelectorAll("[data-unplan]").forEach((b) => b.addEventListener("click", () => { S.plan = S.plan.slice(0, +b.dataset.unplan); render(); }));
   }
 
   // ---------- Wire up ----------

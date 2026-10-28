@@ -67,6 +67,18 @@ header h1 { font: 700 1.5rem/1 var(--display); letter-spacing: .02em; text-trans
 .dot { grid-column: 1; justify-self: center; width: 16px; height: 16px; border-radius: 50%; background: var(--surface); border: 4px solid var(--line); position: relative; z-index: 1; }
 .stop.next .dot { width: 22px; height: 22px; border-width: 6px; }
 .name { font-weight: 500; padding: 8px 8px 8px 6px; display: grid; }
+.stopbtn { font: inherit; color: inherit; background: none; border: 0; text-align: left; cursor: pointer; width: 100%; min-height: 48px; align-content: center; border-radius: 8px; }
+.stopbtn:focus-visible { outline: 3px solid var(--accent); outline-offset: -2px; }
+.stop.open .stopbtn { color: var(--accent); }
+.tag { display: inline-block; vertical-align: 2px; margin-left: 4px; font: 600 .62rem/1 var(--body); letter-spacing: .08em; text-transform: uppercase; padding: .25rem .4rem; border-radius: 4px; border: 1px solid var(--rule); color: var(--muted); }
+.picker { position: relative; padding: 4px 14px 12px 36px; }
+.picker::before { content: ""; position: absolute; left: 15px; width: 6px; top: 0; bottom: 0; background: var(--line); }
+.picker > div { display: grid; gap: 8px; background: var(--bg); border: 1px solid var(--rule); border-radius: 10px; padding: 12px; }
+.picker .btn { justify-self: start; }
+.change { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: .7rem .9rem; border-radius: 10px; border: 1px dashed var(--rule); font-size: .92rem; }
+.train.leg h3 { margin: 0; font: 700 1.5rem/1.05 var(--display); }
+.linkbtn { font: 600 .85rem/1 var(--body); color: var(--accent); background: none; border: 0; padding: .4rem; cursor: pointer; }
+.hint { margin: 0; }
 .stop.next .name { font-weight: 600; font-size: 1.1rem; }
 .name small, .when small { font-size: .75rem; color: var(--muted); font-weight: 400; }
 .when { text-align: right; display: grid; font-variant-numeric: tabular-nums; }
