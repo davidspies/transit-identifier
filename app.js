@@ -20,6 +20,7 @@
     etd: null, etdAt: 0, etdErr: null,
     vehicles: null, vehAt: 0, ctErr: null,
     visits: null, visitsAt: 0,
+    ctHistory: {},       // {train: {stop: last predicted time}}
     lock: null,          // {sys:'bart', routeId, eta} | {sys:'ct', train}
     plan: [],            // planned transfers: [{at: stationKey, sys, routeId|train, eta}]
     picker: null,        // {seg, key, tArr, all} while choosing a transfer
@@ -107,6 +108,14 @@
     try {
       S.visits = TI.stopVisitsFrom511(await get511("StopMonitoring"));
       S.visitsAt = Date.now();
+      // Remember each train's latest predicted time at every stop, so once it has left a
+      // station we still know roughly when (used to interpolate where it is now).
+      const H = S.ctHistory;
+      for (const [train, list] of Object.entries(S.visits)) {
+        const h = (H[train] ||= {});
+        for (const c of list) h[c.name] = c.time;
+      }
+      for (const t of Object.keys(H)) if (Math.max(...Object.values(H[t])) < Date.now() - 3 * 36e5) delete H[t];
     } catch (e) { S.ctErr = e.message === "Failed to fetch" ? "Couldn't reach 511.org" : e.name === "TimeoutError" ? "511.org timed out" : e.message; }
   }
 
@@ -203,7 +212,7 @@
     }
     if (S.mode !== "bart" && (S.vehicles || S.visits)) {
       const opts = S.lock?.sys === "ct" ? { train: S.lock.train, maxD: 5000 } : S.allAlts ? { maxD: 6000 } : {};
-      ct = TI.caltrainCandidates(cur, prev, S.vehicles, { ...opts, visits: S.visits || {}, stops: S.ctStops || {} });
+      ct = TI.caltrainCandidates(cur, prev, S.vehicles, { ...opts, visits: S.visits || {}, stops: S.ctStops || {}, history: S.ctHistory });
     }
     // A BART match with no train plausibly due counts for less.
     const bd = bart?.candidates.length ? bart.candidates[0].offTrack * (bart.candidates[0].plausible ? 1 : 3) : Infinity;
@@ -652,7 +661,7 @@
       lines.push(`  ${c.route.color} → ${c.route.destination} r${c.rank} next ${c.route.stations[c.nextIdx]} ${c.minutesToNext}min off ${m(c.offTrack)} dir ${c.dirScore}${c.plausible ? "" : " implausible"}`);
     lines.push(`Caltrain score ${m(d.cd)} dir ${d.ct?.direction ?? "–"} · ${S.vehicles?.length ?? "–"} positions, ${S.visits ? Object.keys(S.visits).length : "–"} trains w/ predictions, ${S.ctStops ? Object.keys(S.ctStops).length : "–"} stations`);
     for (const c of (d.ct?.candidates || []).slice(0, 4))
-      lines.push(`  #${c.train} ${c.dir || "?"} sched ${m(c.etaScore)} pos ${m(c.posScore)} (raw ${m(c.realD)})${c.next ? ` next ${c.next.name} ${clock(c.next.time)}` : ""}${c.dirOk ? "" : " wrong-dir"}`);
+      lines.push(`  #${c.train} ${c.dir || "?"} live ${m(c.etaScore)}${c.est ? (c.est.method === "interp" ? ` (${Math.round(c.est.f * 100)}% from ${c.est.from})` : ` (@${c.est.speed.toFixed(0)}m/s)`) : ""} pos ${m(c.posScore)} (raw ${m(c.realD)})${c.next ? ` next ${c.next.name} ${clock(c.next.time)}` : ""}${c.dirOk ? "" : " wrong-dir"}`);
     let used = 0; try { used = store.get("ti.511log", []).filter((t) => Date.now() - t < 36e5).length; } catch {}
     lines.push(`511 requests this hour: ${used}/60`);
     el.textContent = lines.join("\n");

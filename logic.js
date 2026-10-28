@@ -279,16 +279,29 @@
         next = list[0];
         const N = stops[next.name];
         const secs = (next.time - now) / 1000;
-        if (N && secs < 25 * 60) {
-          const dN = dist(p, N);
-          etaScore = Math.abs(dN - Math.max(0, secs) * 20);
-          const N2 = list[1] && stops[list[1].name];
-          if (N2) {
-            if (!v.dir) v.dir = N2.lat > N.lat ? "N" : "S";
-            // You should be before the next station, not past it.
-            if (dist(p, N2) < dist(N, N2) - 500) etaScore += 3000;
-          }
+        const N2 = list[1] && stops[list[1].name];
+        if (N2 && N && !v.dir) v.dir = N2.lat > N.lat ? "N" : "S";
+        // The station this train most recently left, with its last predicted time (≈ actual departure).
+        const hist = (opts.history || {})[v.train] || {};
+        let P = null;
+        for (const [name, t] of Object.entries(hist)) {
+          if (t <= now && name !== next.name && stops[name] && (!P || t > P.time)) P = { name, time: t, ...stops[name] };
         }
+        if (N && P && next.time > P.time && now - P.time < 20 * 60e3) {
+          // Interpolate the train's position between the station it left and the next one.
+          const f = Math.max(0, Math.min(1, (now - P.time) / (next.time - P.time)));
+          const E = { lat: P.lat + f * (N.lat - P.lat), lon: P.lon + f * (N.lon - P.lon) };
+          etaScore = dist(p, E);
+          v.est = { method: "interp", from: P.name, f };
+        } else if (N && secs < 25 * 60) {
+          // No departure seen yet: back off from the next station at the train's own predicted speed.
+          let speed = 20;
+          if (N2 && list[1].time > next.time) speed = Math.max(10, Math.min(35, dist(N, N2) / ((list[1].time - next.time) / 1000)));
+          etaScore = Math.abs(dist(p, N) - Math.max(0, secs) * speed);
+          v.est = { method: "speed", speed };
+        }
+        // You should be before the next station, not past it.
+        if (N && N2 && dist(p, N2) < dist(N, N2) - 500) etaScore += 3000;
       }
       const score = Math.min(posScore, etaScore);
       if (score > maxD) continue;
