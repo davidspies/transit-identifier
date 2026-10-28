@@ -99,6 +99,7 @@
     if (!force && Date.now() - S.vehAt < every) return;
     try {
       S.vehicles = TI.vehiclesFrom511(await get511("VehicleMonitoring"));
+      S.vmRaw = S.vehicles.raw;
       S.vehAt = Date.now(); S.ctErr = null;
     } catch (e) { S.ctErr = e.message === "Failed to fetch" ? "Couldn't reach 511.org" : e.name === "TimeoutError" ? "511.org timed out" : e.message; }
   }
@@ -660,6 +661,12 @@
     for (const c of (d.bart?.candidates || []).slice(0, 4))
       lines.push(`  ${c.route.color} → ${c.route.destination} r${c.rank} next ${c.route.stations[c.nextIdx]} ${c.minutesToNext}min off ${m(c.offTrack)} dir ${c.dirScore}${c.plausible ? "" : " implausible"}`);
     lines.push(`Caltrain score ${m(d.cd)} dir ${d.ct?.direction ?? "–"} · ${S.vehicles?.length ?? "–"} positions, ${S.visits ? Object.keys(S.visits).length : "–"} trains w/ predictions, ${S.ctStops ? Object.keys(S.ctStops).length : "–"} stations`);
+    lines.push(`  511 position reports: ${S.vmRaw ?? "–"} (${S.vehicles?.length ?? "–"} with a location) · predictions ${S.visitsAt ? ago(S.visitsAt) : "–"}`);
+    if (S.ctStops) lines.push(`  stations: ${Object.keys(S.ctStops).slice(0, 6).join(", ")}…`);
+    for (const c of (d.ct?.all || []).slice().sort((a, b) => a.score - b.score).slice(0, 8)) {
+      const nx = c.list?.slice(0, 2).map((x) => `${x.name} ${clock(x.time)}`).join(" → ") || "–";
+      lines.push(`  · #${c.train} ${c.dir || "?"} score ${m(c.score)} (live ${m(c.etaScore)}, pos ${m(c.posScore)}) ${nx}${c.why.length ? " ⚠ " + c.why.join("; ") : ""}`);
+    }
     for (const c of (d.ct?.candidates || []).slice(0, 4))
       lines.push(`  #${c.train} ${c.dir || "?"} live ${m(c.etaScore)}${c.est ? (c.est.method === "interp" ? ` (${Math.round(c.est.f * 100)}% from ${c.est.from})` : ` (@${c.est.speed.toFixed(0)}m/s)`) : ""} pos ${m(c.posScore)} (raw ${m(c.realD)})${c.next ? ` next ${c.next.name} ${clock(c.next.time)}` : ""}${c.dirOk ? "" : " wrong-dir"}`);
     let used = 0; try { used = store.get("ti.511log", []).filter((t) => Date.now() - t < 36e5).length; } catch {}

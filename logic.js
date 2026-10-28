@@ -192,8 +192,10 @@
   function vehiclesFrom511(j) {
     const del = arr(j?.Siri?.ServiceDelivery?.VehicleMonitoringDelivery);
     const out = [];
+    out.raw = 0;
     for (const d of del) {
       for (const act of arr(d.VehicleActivity)) {
+        out.raw++;
         const v = act.MonitoredVehicleJourney || {};
         const loc = v.VehicleLocation || {};
         const lat = parseFloat(loc.Latitude), lon = parseFloat(loc.Longitude);
@@ -278,16 +280,20 @@
     for (const v of vehicles || []) byTrain[v.train] = { ...v };
     for (const t of Object.keys(visits)) byTrain[t] ||= { train: t, line: "", dir: "", dest: "", calls: [], recordedAt: null };
 
-    const out = [];
+    const out = [], all = [];
     for (const v of Object.values(byTrain)) {
       if (opts.train && v.train !== opts.train) continue;
+      const why = [];
       let posScore = Infinity, etaScore = Infinity, realD = null, next = null;
       if (isFinite(v.lat) && isFinite(v.lon) && (v.lat || v.lon)) {
         realD = dist(p, v);
         const age = v.recordedAt ? Math.max(0, (now - v.recordedAt) / 1000) : 120;
         posScore = Math.max(0, realD - Math.min(age, 300) * 22);
       }
-      const list = (visits[v.train] || (v.calls?.length >= 2 ? v.calls : [])).filter((c) => c.time > now - 30e3);
+      const raw = visits[v.train] || (v.calls?.length >= 2 ? v.calls : []);
+      const list = raw.filter((c) => c.time > now - 30e3);
+      if (!raw.length) why.push("no predictions");
+      else if (!list.length) why.push(`all ${raw.length} predictions in the past (last ${Math.round((now - raw[raw.length - 1].time) / 60e3)} min ago)`);
       if (list.length) {
         next = list[0];
         const N = stops[next.name];
@@ -300,6 +306,8 @@
         for (const [name, t] of Object.entries(hist)) {
           if (t <= now && name !== next.name && stops[name] && (!P || t > P.time)) P = { name, time: t, ...stops[name] };
         }
+        if (!N) why.push(`no coords for "${next.name}"`);
+        else if (secs >= 25 * 60) why.push(`next stop ${Math.round(secs / 60)} min away`);
         if (N && P && next.time > P.time && now - P.time < 20 * 60e3) {
           // Interpolate the train's position between the station it left and the next one.
           const f = Math.max(0, Math.min(1, (now - P.time) / (next.time - P.time)));
@@ -314,14 +322,15 @@
           v.est = { method: "speed", speed };
         }
         // You should be before the next station, not past it.
-        if (N && N2 && dist(p, N2) < dist(N, N2) - 500) etaScore += 3000;
+        if (N && N2 && dist(p, N2) < dist(N, N2) - 500) { etaScore += 3000; why.push(`looks past ${next.name}`); }
       }
       const score = Math.min(posScore, etaScore);
+      all.push({ train: v.train, dir: v.dir, score, etaScore, posScore, next, list, why, est: v.est });
       if (score > maxD) continue;
       out.push({ ...v, d: score, realD, posScore, etaScore, next, dirOk: !dirWanted || !v.dir || v.dir === dirWanted });
     }
     out.sort((a, b) => (b.dirOk - a.dirOk) || (a.d - b.d));
-    return { candidates: out, nearestD: out[0]?.d ?? null, direction: dirWanted ? "known" : "unknown" };
+    return { candidates: out, all, nearestD: out[0]?.d ?? null, direction: dirWanted ? "known" : "unknown" };
   }
 
   const api = { dist, project, bearing, locateOnRoute, etdFor, bartCandidates, bartStops, parse511, vehiclesFrom511, stopVisitsFrom511, cleanStop, caltrainCandidates, stopCoordsFrom511, fixDay };
