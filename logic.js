@@ -96,7 +96,7 @@
     }
     if (!locs.length) return { candidates: [], nearestD: null, direction: "none" };
     const dmin = Math.min(...locs.map((x) => x.loc.d));
-    let near = locs.filter((x) => x.loc.d <= dmin + 200);
+    let near = locs.filter((x) => x.loc.d <= dmin + (opts.spread ?? 200));
 
     // Direction: along-track progress since previous fix, else GPS heading.
     let direction = "unknown";

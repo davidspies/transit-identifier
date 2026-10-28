@@ -21,7 +21,8 @@
     visits: null, visitsAt: 0,
     lock: null,          // {sys:'bart', routeId, eta} | {sys:'ct', train}
     plan: [],            // planned transfers: [{at: stationKey, sys, routeId|train, eta}]
-    picker: null,        // {seg, key, tArr} while choosing a transfer
+    picker: null,        // {seg, key, tArr, all} while choosing a transfer
+    allAlts: false,      // show every candidate train, not just the top 3
     lastResult: null,
     geoErr: null,
     started: false,
@@ -174,11 +175,12 @@
   function decide(cur, prev) {
     let bart = null, ct = null;
     if (S.mode !== "ct" && S.bart && S.etd) {
-      const opts = S.lock?.sys === "bart" ? { routeId: S.lock.routeId, maxD: 3000, ranks: 3 } : {};
+      const opts = S.lock?.sys === "bart" ? { routeId: S.lock.routeId, maxD: 3000, ranks: 3 }
+        : S.allAlts ? { maxD: 2500, ranks: 4, spread: 1500 } : {};
       bart = TI.bartCandidates(cur, prev, { ...S.bart, etd: S.etd }, opts);
     }
     if (S.mode !== "bart" && S.vehicles) {
-      const opts = S.lock?.sys === "ct" ? { train: S.lock.train, maxD: 5000 } : {};
+      const opts = S.lock?.sys === "ct" ? { train: S.lock.train, maxD: 5000 } : S.allAlts ? { maxD: 6000 } : {};
       ct = TI.caltrainCandidates(cur, prev, S.vehicles, opts);
     }
     const bd = bart?.candidates.length ? bart.candidates[0].offTrack : Infinity;
@@ -215,7 +217,8 @@
         sub: [top.cars ? `${top.cars}-car train` : null, top.atStation ? "Stopped at station" : null].filter(Boolean).join(" · "),
         color: top.route.hexcolor, plausible: top.plausible,
         lockKey: { sys: "bart", routeId: top.route.routeID, eta: etaOf(top) },
-        alts: bart.candidates.filter((c) => c !== top).slice(0, 3).map((c) => ({
+        moreAlts: bart.candidates.length - 1 > 3,
+        alts: bart.candidates.filter((c) => c !== top).slice(0, S.allAlts ? 99 : 3).map((c) => ({
           label: name(c), why: why(c),
           detail: `${nextName(c)} in ${c.minutesToNext} min`, color: c.route.hexcolor,
           lock: { sys: "bart", routeId: c.route.routeID, eta: etaOf(c) },
@@ -235,7 +238,8 @@
         color: "#c8102e", plausible: v.d < 800,
         posAge: v.recordedAt ? Math.round((Date.now() - v.recordedAt) / 1000) : null,
         lockKey: { sys: "ct", train: v.train },
-        alts: ct.candidates.slice(1, 4).map((c) => ({
+        moreAlts: true,
+        alts: ct.candidates.slice(1, S.allAlts ? 99 : 4).map((c) => ({
           label: `Caltrain ${c.train}`, why: c.dirOk ? "Nearby train" : "Opposite direction",
           detail: `${c.dir === "N" ? "Northbound" : "Southbound"} · ${c.d < 1000 ? Math.round(c.d) + " m" : (c.d / 1000).toFixed(1) + " km"} away`,
           color: "#c8102e", lock: { sys: "ct", train: c.train },
@@ -275,7 +279,7 @@
   }
 
   // Trains leaving station `key` at or after `tArr`, excluding the train you're on (`ident`).
-  function transferOptions(key, tArr, ident) {
+  function transferOptions(key, tArr, ident, all) {
     const out = [], seen = new Set();
     const abbr = bartAbbrOf(key), ctName = ctNameOf(key);
     if (abbr && S.bart && S.etd) {
@@ -283,20 +287,21 @@
       for (const r of S.bart.routes) {
         const i = r.stations.indexOf(abbr);
         if (i < 0 || i === r.stations.length - 1) continue;
-        if (ident?.sys === "bart" && (r.routeID === ident.routeId || (mine && r.hexcolor === mine.hexcolor))) continue;
+        if (ident?.sys === "bart" && r.routeID === ident.routeId) continue;
         let n = 0;
         for (const e of TI.etdFor(S.etd, abbr, r)) {
           const t = S.etdAt + e.minutes * 60e3;
           // BART holds connecting trains for timed transfers, and ETDs are whole-minute
           // departure estimates, so a connection can read the same minute or up to 2 earlier than yours.
           const slack = ident?.sys === "bart" ? 2.5 * 60e3 : 60e3;
-          if (t < tArr - slack) continue;
+          const early = t < tArr - slack;
+          if (early && !all) continue;
           const dk = `${r.hexcolor}|${e.destAbbr}|${e.minutes}`;
           if (seen.has(dk)) continue;
           seen.add(dk);
           out.push({ sys: "bart", routeId: r.routeID, at: abbr, eta: t, time: t, color: r.hexcolor,
-            label: `${titleCase(r.color)} to ${e.destName || bartDestName(r.destination)}`, cars: e.cars });
-          if (++n >= 2) break;
+            label: `${titleCase(r.color)} to ${e.destName || bartDestName(r.destination)}`, cars: e.cars, early });
+          if (++n >= 2 && !all) break;
         }
       }
     }
@@ -304,12 +309,14 @@
       for (const [train, list] of Object.entries(S.visits)) {
         if (ident?.sys === "ct" && train === ident.train) continue;
         const i = list.findIndex((s) => s.name === ctName);
-        if (i < 0 || i === list.length - 1 || list[i].time < tArr - 60e3) continue;
+        const early = list[i].time < tArr - 60e3;
+        if (i < 0 || i === list.length - 1 || (early && !all)) continue;
         out.push({ sys: "ct", train, at: "ct:" + ctName, eta: list[i].time, time: list[i].time, color: "#c8102e",
-          label: `Caltrain ${train} to ${list[list.length - 1].name}` });
+          label: `Caltrain ${train} to ${list[list.length - 1].name}`, early });
       }
     }
-    return out.sort((a, b) => a.time - b.time).slice(0, 8);
+    out.sort((a, b) => a.time - b.time);
+    return all ? out : out.slice(0, 5);
   }
 
   // Re-find a planned connection in the latest data. Returns a segment or null.
@@ -405,14 +412,15 @@
     const segs = itinerary(r);
     const pk = S.picker;
     const pickerHtml = (si, s) => {
-      const opts = transferOptions(s.key, s.time, segs[si].ident);
+      const opts = transferOptions(s.key, s.time, segs[si].ident, pk.all);
+      const more = !pk.all;
       const loadingCt = ctNameOf(s.key) && S.key511 && !S.visits;
       return `<li class="picker"><div>
         <p class="eyebrow">Connections at ${esc(s.name)} · you arrive ${clock(s.time)}</p>
         ${opts.length ? opts.map((o, i) => {
-          return `<button class="alt opt" data-o="${i}" style="--line:${esc(o.color)}"><span class="swatch"></span><span>${esc(o.label)}<small>Leaves ${clock(o.time)} · ${waitText(o.time - s.time, o.sys === "bart" && segs[si].ident?.sys === "bart")}${o.cars ? ` · ${o.cars} cars` : ""}</small></span><span class="pick">Take</span></button>`;
+          return `<button class="alt opt" data-o="${i}" style="--line:${esc(o.color)}"><span class="swatch"></span><span>${esc(o.label)}<small>Leaves ${clock(o.time)} · ${o.early ? "before your estimated arrival" : waitText(o.time - s.time, o.sys === "bart" && segs[si].ident?.sys === "bart")}${o.cars ? ` · ${o.cars} cars` : ""}</small></span><span class="pick">Take</span></button>`;
         }).join("") : `<p class="muted small">${loadingCt ? "Loading Caltrain times…" : ctNameOf(s.key) && !S.key511 ? "Add a 511 key in Settings to see Caltrain connections." : "No connecting trains in the live data right now."}</p>`}
-        <button class="btn" id="pickcancel" type="button">Cancel</button>
+        <div class="actions">${more ? `<button class="btn" id="pickmore" type="button">More…</button>` : ""}<button class="btn" id="pickcancel" type="button">Cancel</button></div>
       </div></li>`;
     };
     let pickerOpts = null;
@@ -422,7 +430,7 @@
         const isChange = seg.change && i === seg.stops.length - 1;
         const xfer = !isChange && isTransferStation(s.key, seg.ident);
         const open = pk && pk.seg === si && pk.key === s.key;
-        if (open) pickerOpts = transferOptions(s.key, s.time, seg.ident);
+        if (open) pickerOpts = transferOptions(s.key, s.time, seg.ident, pk.all);
         return `
         <li class="stop${isNext ? " next" : ""}${open ? " open" : ""}">
           <span class="dot" aria-hidden="true"></span>
@@ -454,17 +462,20 @@
       </div>
       ${warn.map((w) => `<p class="warn">${esc(w)}</p>`).join("")}
       ${r.stops.length ? `<p class="hint muted small">Tap a station to plan a transfer there.</p>${segHtml}` : `<p class="muted">No upcoming stop times available for this train yet.</p>`}
-      ${r.alts?.length ? `<div class="alts"><p class="eyebrow">Other possibilities</p>${r.alts.map((a, i) => `<button class="alt" data-i="${i}" style="--line:${esc(a.color)}"><span class="swatch"></span><span><span class="why">${esc(a.why)}</span>${esc(a.label)}<small>${esc(a.detail)}</small></span><span class="pick">Switch</span></button>`).join("")}</div>` : ""}
+      ${r.alts?.length ? `<div class="alts"><p class="eyebrow">Other possibilities</p>${r.alts.map((a, i) => `<button class="alt" data-i="${i}" style="--line:${esc(a.color)}"><span class="swatch"></span><span><span class="why">${esc(a.why)}</span>${esc(a.label)}<small>${esc(a.detail)}</small></span><span class="pick">Switch</span></button>`).join("")}${S.allAlts ? `<button class="btn" id="altsless" type="button">Fewer</button>` : `<button class="btn" id="altsmore" type="button">More…</button>`}</div>` : `<div class="alts"><button class="btn" id="altsmore" type="button" ${S.allAlts ? "hidden" : ""}>Not right? Look wider…</button></div>`}
     `;
     $("#lock")?.addEventListener("click", () => { S.lock = r.lockKey; tick(); });
     $("#unlock")?.addEventListener("click", () => { S.lock = null; tick(); });
-    card.querySelectorAll(".alt:not(.opt)").forEach((b) => b.addEventListener("click", () => { S.lock = r.alts[+b.dataset.i].lock; tick(); }));
+    card.querySelectorAll(".alt:not(.opt)").forEach((b) => b.addEventListener("click", () => { S.lock = r.alts[+b.dataset.i].lock; S.allAlts = false; tick(); }));
     card.querySelectorAll(".stopbtn").forEach((b) => b.addEventListener("click", () => {
       const seg = +b.dataset.seg, key = b.dataset.key;
       if (S.picker && S.picker.seg === seg && S.picker.key === key) { S.picker = null; render(); return; }
       openPicker(seg, key, +b.dataset.t);
     }));
     $("#pickcancel")?.addEventListener("click", () => { S.picker = null; render(); });
+    $("#pickmore")?.addEventListener("click", () => { S.picker.all = true; render(); });
+    $("#altsmore")?.addEventListener("click", () => { S.allAlts = true; tick(); });
+    $("#altsless")?.addEventListener("click", () => { S.allAlts = false; tick(); });
     card.querySelectorAll(".opt").forEach((b) => b.addEventListener("click", () => {
       const o = pickerOpts[+b.dataset.o];
       const leg = o.sys === "bart" ? { sys: "bart", at: o.at, routeId: o.routeId, eta: o.eta } : { sys: "ct", at: o.at, train: o.train, eta: o.eta };
