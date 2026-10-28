@@ -41,7 +41,7 @@
   async function bartGet(path, params) {
     const u = new URL(BART + path);
     for (const [k, v] of Object.entries({ ...params, key: BART_KEY, json: "y" })) u.searchParams.set(k, v);
-    const r = await fetch(u);
+    const r = await fetch(u, { signal: AbortSignal.timeout?.(15e3) });
     if (!r.ok) throw new Error("BART returned " + r.status);
     return (await r.json()).root;
   }
@@ -82,7 +82,7 @@
     if (!budgetOk()) throw new Error("511 hourly limit reached, waiting");
     const u = `${API511}${endpoint}?api_key=${encodeURIComponent(S.key511)}&agency=CT&format=json`;
     spend();
-    const r = await fetch(u);
+    const r = await fetch(u, { signal: AbortSignal.timeout?.(15e3) });
     if (r.status === 401 || r.status === 403) throw new Error("511 rejected the key");
     if (r.status === 429) throw new Error("511 hourly limit reached, waiting");
     if (!r.ok) throw new Error("511 returned " + r.status);
@@ -96,7 +96,7 @@
     try {
       S.vehicles = TI.vehiclesFrom511(await get511("VehicleMonitoring"));
       S.vehAt = Date.now(); S.ctErr = null;
-    } catch (e) { S.ctErr = e.message === "Failed to fetch" ? "Couldn't reach 511.org" : e.message; }
+    } catch (e) { S.ctErr = e.message === "Failed to fetch" ? "Couldn't reach 511.org" : e.name === "TimeoutError" ? "511.org timed out" : e.message; }
   }
 
   async function refreshVisits(force) {
@@ -158,11 +158,13 @@
       const cur = S.fixes[S.fixes.length - 1];
       const wantBart = S.mode !== "ct";
       const wantCt = S.mode !== "bart" && S.key511;
+      // Show each system as soon as its data lands, rather than waiting for the slower one.
+      const update = () => { if (cur) S.lastResult = decide(cur, prevFix(cur)); render(); };
       const jobs = [];
-      if (wantBart && S.bart) jobs.push(refreshEtd(force));
-      if (wantCt && cur) jobs.push(refreshVehicles(force));
+      if (wantBart && S.bart) jobs.push(refreshEtd(force).then(update));
+      if (wantCt && cur) jobs.push(refreshVehicles(force).then(update));
       await Promise.all(jobs);
-      if (cur) S.lastResult = decide(cur, prevFix(cur));
+      update();
       const needVisits = S.plan.some((l) => l.sys === "ct") || (S.lastResult?.sys === "ct" && S.lastResult.vehicle && S.lastResult.vehicle.calls.length < 2);
       if (needVisits && S.key511) {
         await refreshVisits(force);
@@ -185,6 +187,14 @@
     }
     const bd = bart?.candidates.length ? bart.candidates[0].offTrack : Infinity;
     const cd = ct?.candidates.length ? ct.candidates[0].d : Infinity;
+
+    // A system still loading might be the better match, so only commit early when we're clearly on the other one.
+    const bartPending = S.mode !== "ct" && !S.etd && !S.etdErr;
+    const ctPending = S.mode !== "bart" && !!S.key511 && !S.vehicles && !S.ctErr;
+    if (!S.lock && S.mode === "auto") {
+      if (ctPending && !(bd <= 300)) return { sys: null, fix: cur, waiting: "Caltrain" };
+      if (bartPending && !(cd <= 500)) return { sys: null, fix: cur, waiting: "BART" };
+    }
 
     let sys = null;
     if (S.lock) sys = S.lock.sys;
@@ -397,6 +407,10 @@
     const r = S.lastResult;
     const card = $("#result");
     if (!r) { card.innerHTML = `<p class="muted">Waiting for your location and live data…</p>`; return; }
+    if (!r.sys && r.waiting) {
+      card.innerHTML = `<div class="empty"><h2>Checking ${esc(r.waiting)}…</h2><p class="muted">Waiting for live ${esc(r.waiting)} data before deciding which train you're on.</p></div>`;
+      return;
+    }
     if (!r.sys) {
       card.innerHTML = `<div class="empty"><h2>Not on a train line</h2><p class="muted">You don't appear to be on BART${S.key511 ? " or Caltrain" : ""} right now.${r.nearest ? ` Nearest BART station: <strong>${esc(r.nearest.name)}</strong>, ${(r.nearest.d / 1000).toFixed(1)} km away.` : ""}</p>${!S.key511 && S.mode !== "bart" ? `<p class="muted">Caltrain detection is off until you add a 511 key in Settings.</p>` : ""}</div>`;
       return;
