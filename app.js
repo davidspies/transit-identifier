@@ -23,6 +23,8 @@
     plan: [],            // planned transfers: [{at: stationKey, sys, routeId|train, eta}]
     picker: null,        // {seg, key, tArr, all} while choosing a transfer
     allAlts: false,      // show every candidate train, not just the top 3
+    manualOpen: null,    // {step:'list'} | {step:'bart', routeId} while picking a train by hand
+    manualDismissed: false,
     lastResult: null,
     geoErr: null,
     started: false,
@@ -157,24 +159,27 @@
     try {
       const cur = S.fixes[S.fixes.length - 1];
       const wantBart = S.mode !== "ct";
-      const wantCt = S.mode !== "bart" && S.key511;
+      const wantCt = (S.mode !== "bart" || S.manualOpen || S.lock?.manual) && S.key511;
       // Show each system as soon as its data lands, rather than waiting for the slower one.
-      const update = () => { if (cur) S.lastResult = decide(cur, prevFix(cur)); render(); };
+      const update = () => { S.lastResult = decide(cur, cur ? prevFix(cur) : null); render(); };
       const jobs = [];
       if (wantBart && S.bart) jobs.push(refreshEtd(force).then(update));
-      if (wantCt && cur) jobs.push(refreshVehicles(force).then(update));
+      if (wantCt && (cur || S.manualOpen || S.lock?.manual)) jobs.push(refreshVehicles(force).then(update));
       await Promise.all(jobs);
       update();
-      const needVisits = S.plan.some((l) => l.sys === "ct") || (S.lastResult?.sys === "ct" && S.lastResult.vehicle && S.lastResult.vehicle.calls.length < 2);
+      const needVisits = S.plan.some((l) => l.sys === "ct") || !!S.manualOpen ||
+        (S.lastResult?.sys === "ct" && S.lastResult.vehicle && S.lastResult.vehicle.calls.length < 2);
       if (needVisits && S.key511) {
         await refreshVisits(force);
-        S.lastResult = decide(cur, prevFix(cur));
+        S.lastResult = decide(cur, cur ? prevFix(cur) : null);
       }
     } finally { ticking = false; render(); }
   }
 
   // ---------- Decide which train ----------
   function decide(cur, prev) {
+    if (S.lock?.manual) return S.lock.sys === "bart" ? manualBart(cur) : manualCaltrain(cur);
+    if (!cur) return null;
     let bart = null, ct = null;
     if (S.mode !== "ct" && S.bart && S.etd) {
       const opts = S.lock?.sys === "bart" ? { routeId: S.lock.routeId, maxD: 3000, ranks: 3 }
@@ -268,6 +273,102 @@
     }
     return { sys: null, fix: cur, nearest, nearestCt, ctCount: S.vehicles?.length ?? null };
   }
+
+  // ---------- Picked by hand (no location needed) ----------
+  function manualBart(cur) {
+    const r = S.bart?.routes.find((x) => x.routeID === S.lock.routeId);
+    if (!r || !S.etd) return { sys: null, fix: cur, waiting: "BART" };
+    const L = S.lock;
+    let idx = r.stations.indexOf(L.nextAbbr);
+    // Move along the line as the train leaves each station.
+    while (idx < r.stations.length - 1 && Date.now() > L.eta + 45e3) {
+      const a = S.bart.stations[r.stations[idx]], b = S.bart.stations[r.stations[idx + 1]];
+      idx++; L.nextAbbr = r.stations[idx];
+      const e = TI.etdFor(S.etd, L.nextAbbr, r).find((e) => S.etdAt + e.minutes * 60e3 >= L.eta - 60e3);
+      L.eta = e ? S.etdAt + e.minutes * 60e3 : L.eta + (a && b ? TI.dist(a, b) / 15 + 30 : 120) * 1e3;
+    }
+    const ests = TI.etdFor(S.etd, L.nextAbbr, r);
+    const best = ests.length ? ests.reduce((x, y) => (Math.abs(S.etdAt + y.minutes * 60e3 - L.eta) < Math.abs(S.etdAt + x.minutes * 60e3 - L.eta) ? y : x)) : null;
+    const minutes = best ? best.minutes : Math.max(0, (L.eta - S.etdAt) / 60e3);
+    L.eta = S.etdAt + minutes * 60e3;
+    const cand = { route: r, nextIdx: idx, minutesToNext: minutes };
+    const stops = TI.bartStops(cand, { ...S.bart, etd: S.etd }).map((s) => ({ key: s.abbr, name: s.name, time: S.etdAt + s.minutes * 60e3, estimated: s.estimated || !best }));
+    return {
+      sys: "bart", ident: { sys: "bart", routeId: r.routeID }, fix: cur, direction: "known", manual: true, stops,
+      title: `${titleCase(r.color)} line to ${bartDestName(r.destination)}`,
+      sub: [best?.cars ? `${best.cars}-car train` : null, "Picked by hand"].filter(Boolean).join(" · "),
+      color: r.hexcolor, plausible: true, alts: [],
+    };
+  }
+
+  function caltrainStops(train, v) {
+    let calls = v?.calls?.length >= 2 ? v.calls : S.visits?.[train] || v?.calls || [];
+    return calls.filter((c) => c.time > Date.now() - 60e3).map((c) => ({ key: "ct:" + c.name, name: c.name, time: c.time, estimated: false }));
+  }
+
+  function manualCaltrain(cur) {
+    const train = S.lock.train;
+    const v = (S.vehicles || []).find((x) => x.train === train);
+    const dirWord = v?.dir === "N" ? "Northbound" : v?.dir === "S" ? "Southbound" : "";
+    return {
+      sys: "ct", ident: { sys: "ct", train }, fix: cur, direction: "known", manual: true, vehicle: v || { calls: [] },
+      stops: caltrainStops(train, v),
+      title: `Caltrain ${train}`,
+      sub: [dirWord, v?.line, v?.dest ? `to ${TI.cleanStop(v.dest)}` : null, "Picked by hand"].filter(Boolean).join(" · "),
+      color: "#c8102e", plausible: true, alts: [],
+    };
+  }
+
+  function manualHtml() {
+    const m = S.manualOpen;
+    const head = `<div class="manual-head"><h2>Pick your train</h2><button class="btn" id="mclose" type="button">Cancel</button></div>`;
+    if (m.step === "bart") {
+      const r = S.bart?.routes.find((x) => x.routeID === m.routeId);
+      if (!r) return head;
+      return `${head}<p class="eyebrow">${esc(titleCase(r.color))} line to ${esc(bartDestName(r.destination))} · what's your next stop?</p>
+        <div class="alts">${r.stations.slice(1).map((a) => `<button class="alt mstation" data-abbr="${esc(a)}" style="--line:${esc(r.hexcolor)}"><span class="swatch"></span><span>${esc(bartDestName(a))}</span><span class="pick">Next stop</span></button>`).join("")}</div>
+        <button class="linkbtn" id="mback" type="button">← All trains</button>`;
+    }
+    let ct = "";
+    if (S.mode !== "bart") {
+      if (!S.key511) ct = `<p class="muted small">Add a 511 key in Settings to list Caltrain trains.</p>`;
+      else if (!S.vehicles) ct = `<p class="muted small">${S.ctErr ? esc(S.ctErr) : "Loading Caltrain trains…"}</p>`;
+      else {
+        const list = S.vehicles.slice().sort((a, b) => (a.dir + a.train).localeCompare(b.dir + b.train, undefined, { numeric: true }));
+        ct = list.length ? `<div class="alts">${list.map((v) => {
+          const next = caltrainStops(v.train, v)[0];
+          return `<button class="alt mct" data-train="${esc(v.train)}" style="--line:#c8102e"><span class="swatch"></span><span>Caltrain ${esc(v.train)}<small>${v.dir === "N" ? "Northbound" : v.dir === "S" ? "Southbound" : ""}${v.line ? " · " + esc(v.line) : ""}${next ? ` · next: ${esc(next.name)} ${clock(next.time)}` : ""}</small></span><span class="pick">This one</span></button>`;
+        }).join("")}</div>` : `<p class="muted small">511 reports no Caltrain trains running right now.</p>`;
+      }
+      ct = `<p class="eyebrow">Caltrain · running now</p>${ct}`;
+    }
+    let bart = "";
+    if (S.mode !== "ct" && S.bart) {
+      const seen = new Set();
+      const routes = S.bart.routes.filter((r) => !seen.has(r.routeID) && seen.add(r.routeID));
+      bart = `<p class="eyebrow">BART · pick your line</p><div class="alts">${routes.map((r) => `<button class="alt mline" data-route="${esc(r.routeID)}" style="--line:${esc(r.hexcolor)}"><span class="swatch"></span><span>${esc(titleCase(r.color))} to ${esc(bartDestName(r.destination))}</span><span class="pick">›</span></button>`).join("")}</div>`;
+    }
+    return `${head}${ct}${bart}`;
+  }
+
+  function wireManual(card) {
+    const close = () => { S.manualOpen = null; S.manualDismissed = true; render(); };
+    $("#mclose")?.addEventListener("click", close);
+    $("#mback")?.addEventListener("click", () => { S.manualOpen = { step: "list" }; render(); });
+    card.querySelectorAll(".mline").forEach((b) => b.addEventListener("click", () => { S.manualOpen = { step: "bart", routeId: b.dataset.route }; render(); }));
+    card.querySelectorAll(".mstation").forEach((b) => b.addEventListener("click", () => {
+      const r = S.bart.routes.find((x) => x.routeID === S.manualOpen.routeId);
+      const first = S.etd ? TI.etdFor(S.etd, b.dataset.abbr, r)[0] : null;
+      S.lock = { sys: "bart", manual: true, routeId: r.routeID, nextAbbr: b.dataset.abbr, eta: first ? S.etdAt + first.minutes * 60e3 : Date.now() + 120e3 };
+      S.manualOpen = null; S.plan = []; tick();
+    }));
+    card.querySelectorAll(".mct").forEach((b) => b.addEventListener("click", () => {
+      S.lock = { sys: "ct", manual: true, train: b.dataset.train };
+      S.manualOpen = null; S.plan = []; tick();
+    }));
+  }
+
+  function openManual() { S.manualOpen = { step: "list" }; render(); tick(); }
 
   // ---------- Transfers ----------
   // Station keys: BART abbreviation ("MCAR") or "ct:<name>" for Caltrain. Millbrae links the two.
@@ -410,16 +511,26 @@
 
     const r = S.lastResult;
     const card = $("#result");
-    if (!r) { card.innerHTML = `<p class="muted">Waiting for your location and live data…</p>`; return; }
+    // Fuzzy location (e.g. a laptop on train Wi-Fi): offer hand-picking straight away.
+    if (!S.manualOpen && !S.manualDismissed && !S.lock && cur && cur.acc > 2000) S.manualOpen = { step: "list" };
+    if (S.manualOpen) {
+      card.innerHTML = `${cur?.acc > 2000 ? `<p class="warn">Your location is only accurate to about ${Math.round(cur.acc / 1000)} km, too rough to tell which train you're on. Pick it below.</p>` : ""}${manualHtml()}`;
+      wireManual(card);
+      return;
+    }
+    const pickLink = `<button class="linkbtn" id="mopen" type="button">Pick my train by hand</button>`;
+    if (!r) { card.innerHTML = `<p class="muted">Waiting for your location and live data…</p>${pickLink}`; $("#mopen").addEventListener("click", openManual); return; }
     if (!r.sys && r.waiting) {
-      card.innerHTML = `<div class="empty"><h2>Checking ${esc(r.waiting)}…</h2><p class="muted">Waiting for live ${esc(r.waiting)} data before deciding which train you're on.</p></div>`;
+      card.innerHTML = `<div class="empty"><h2>Checking ${esc(r.waiting)}…</h2><p class="muted">Waiting for live ${esc(r.waiting)} data before deciding which train you're on.</p>${pickLink}</div>`;
+      $("#mopen").addEventListener("click", openManual);
       return;
     }
     if (!r.sys) {
       const km = (d) => (d / 1000).toFixed(1) + " km";
       const fuzzy = r.fix?.acc > 500 ? `<p class="warn">Your location is only accurate to about ${km(r.fix.acc)}. Laptops and tethered connections often can't place you precisely; a phone with GPS works best.</p>` : "";
       const ctLine = r.ctCount === 0 ? " 511 reports no Caltrain trains running right now." : r.nearestCt ? ` Nearest Caltrain: <strong>${esc(r.nearestCt.train)}</strong>, ${km(r.nearestCt.d)} away${r.nearestCt.age != null ? ` (position ${r.nearestCt.age < 90 ? r.nearestCt.age + " s" : Math.round(r.nearestCt.age / 60) + " min"} old)` : ""}.` : "";
-      card.innerHTML = `<div class="empty">${fuzzy}<h2>Not on a train line</h2><p class="muted">You don't appear to be on BART${S.key511 ? " or Caltrain" : ""} right now.${r.nearest ? ` Nearest BART station: <strong>${esc(r.nearest.name)}</strong>, ${km(r.nearest.d)} away.` : ""}${ctLine}</p>${!S.key511 && S.mode !== "bart" ? `<p class="muted">Caltrain detection is off until you add a 511 key in Settings.</p>` : ""}</div>`;
+      card.innerHTML = `<div class="empty">${fuzzy}<h2>Not on a train line</h2><p class="muted">You don't appear to be on BART${S.key511 ? " or Caltrain" : ""} right now.${r.nearest ? ` Nearest BART station: <strong>${esc(r.nearest.name)}</strong>, ${km(r.nearest.d)} away.` : ""}${ctLine}</p>${!S.key511 && S.mode !== "bart" ? `<p class="muted">Caltrain detection is off until you add a 511 key in Settings.</p>` : ""}${pickLink}</div>`;
+      $("#mopen").addEventListener("click", openManual);
       return;
     }
     const sysName = r.sys === "bart" ? "BART" : "Caltrain";
@@ -476,15 +587,17 @@
         <h2>${esc(r.title)}</h2>
         ${r.sub ? `<p class="sub">${esc(r.sub)}</p>` : ""}
         <div class="actions">
-          ${S.lock ? `<button id="unlock" class="btn">Not my train</button><span class="muted small">Locked to this train</span>` : `<button id="lock" class="btn primary">Yes, this is my train</button>`}
+          ${S.lock ? `<button id="unlock" class="btn">Not my train</button><span class="muted small">${S.lock.manual ? "Picked by hand" : "Locked to this train"}</span>` : `<button id="lock" class="btn primary">Yes, this is my train</button>`}
+          ${pickLink}
         </div>
       </div>
       ${warn.map((w) => `<p class="warn">${esc(w)}</p>`).join("")}
       ${r.stops.length ? `<p class="hint muted small">Tap a station to plan a transfer there.</p>${segHtml}` : `<p class="muted">No upcoming stop times available for this train yet.</p>`}
-      ${r.alts?.length ? `<div class="alts"><p class="eyebrow">Other possibilities</p>${r.alts.map((a, i) => `<button class="alt" data-i="${i}" style="--line:${esc(a.color)}"><span class="swatch"></span><span><span class="why">${esc(a.why)}</span>${esc(a.label)}<small>${esc(a.detail)}</small></span><span class="pick">Switch</span></button>`).join("")}${S.allAlts ? `<button class="btn" id="altsless" type="button">Fewer</button>` : `<button class="btn" id="altsmore" type="button">More…</button>`}</div>` : `<div class="alts"><button class="btn" id="altsmore" type="button" ${S.allAlts ? "hidden" : ""}>Not right? Look wider…</button></div>`}
+      ${r.alts?.length ? `<div class="alts"><p class="eyebrow">Other possibilities</p>${r.alts.map((a, i) => `<button class="alt" data-i="${i}" style="--line:${esc(a.color)}"><span class="swatch"></span><span><span class="why">${esc(a.why)}</span>${esc(a.label)}<small>${esc(a.detail)}</small></span><span class="pick">Switch</span></button>`).join("")}${S.allAlts ? `<button class="btn" id="altsless" type="button">Fewer</button>` : `<button class="btn" id="altsmore" type="button">More…</button>`}</div>` : r.manual ? "" : `<div class="alts"><button class="btn" id="altsmore" type="button" ${S.allAlts ? "hidden" : ""}>Not right? Look wider…</button></div>`}
     `;
     $("#lock")?.addEventListener("click", () => { S.lock = r.lockKey; tick(); });
-    $("#unlock")?.addEventListener("click", () => { S.lock = null; tick(); });
+    $("#unlock")?.addEventListener("click", () => { S.lock = null; S.manualDismissed = false; tick(); });
+    $("#mopen")?.addEventListener("click", openManual);
     card.querySelectorAll(".alt:not(.opt)").forEach((b) => b.addEventListener("click", () => { S.lock = r.alts[+b.dataset.i].lock; S.allAlts = false; tick(); }));
     card.querySelectorAll(".stopbtn").forEach((b) => b.addEventListener("click", () => {
       const seg = +b.dataset.seg, key = b.dataset.key;
