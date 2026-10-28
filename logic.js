@@ -87,7 +87,7 @@
   // Figure out candidate BART trains for fix `p`, previous fix `prev` (or null).
   // data: {stations: {ABBR:{lat,lon,name}}, routes: [...], etd: {ABBR: station}, etdAt: ms}
   function bartCandidates(p, prev, data, opts = {}) {
-    const maxD = opts.maxD ?? 1200;
+    const maxD = (opts.maxD ?? 1200) + Math.min(p.acc || 0, 2000);
     const locs = [];
     for (const r of data.routes) {
       if (opts.routeId && r.routeID !== opts.routeId) continue;
@@ -240,9 +240,16 @@
       const c = Math.cos((p.heading * Math.PI) / 180);
       if (Math.abs(c) > 0.3) dirWanted = c > 0 ? "N" : "S";
     }
+    // Allow for how far a train can travel since its position was recorded (~35 m/s top speed)
+    // and for how fuzzy our own fix is.
+    const now = opts.now ?? Date.now();
+    const slack = (v) => {
+      const age = v.recordedAt ? Math.max(0, (now - v.recordedAt) / 1000) : 120;
+      return maxD + Math.min(age, 300) * 35 + Math.min(p.acc || 0, 3000);
+    };
     let list = vehicles
       .map((v) => ({ ...v, d: dist(p, v) }))
-      .filter((v) => v.d <= maxD && (!opts.train || v.train === opts.train));
+      .filter((v) => v.d <= slack(v) && (!opts.train || v.train === opts.train));
     for (const v of list) v.dirOk = !dirWanted || !v.dir || v.dir === dirWanted;
     list.sort((a, b) => (b.dirOk - a.dirOk) || (a.d - b.d));
     return { candidates: list, nearestD: list[0]?.d ?? null, direction: dirWanted ? "known" : "unknown" };

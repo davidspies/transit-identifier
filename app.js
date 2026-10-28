@@ -202,7 +202,7 @@
     else if (S.mode === "ct") sys = "ct";
     else if (bd === Infinity && cd === Infinity) sys = null;
     // Caltrain vehicle positions lag, so give them extra slack versus the static BART track.
-    else sys = cd < 500 || cd < bd * 1.5 ? "ct" : "bart";
+    else sys = cd < 500 || bd === Infinity || cd < bd * 1.5 ? "ct" : "bart";
 
     if (sys === "bart" && bart?.candidates.length) {
       const etaOf = (c) => S.etdAt + c.minutesToNext * 60e3;
@@ -256,13 +256,17 @@
         })),
       };
     }
-    // Nothing matched: report nearest BART station for context.
-    let nearest = null;
-    if (S.bart) for (const [abbr, st] of Object.entries(S.bart.stations)) {
+    // Nothing matched: report what's nearest, for context.
+    let nearest = null, nearestCt = null;
+    if (S.bart) for (const st of Object.values(S.bart.stations)) {
       const d = TI.dist(cur, st);
       if (!nearest || d < nearest.d) nearest = { name: st.name, d };
     }
-    return { sys: null, fix: cur, nearest };
+    for (const v of S.vehicles || []) {
+      const d = TI.dist(cur, v);
+      if (!nearestCt || d < nearestCt.d) nearestCt = { train: v.train, d, age: v.recordedAt ? Math.round((Date.now() - v.recordedAt) / 1000) : null };
+    }
+    return { sys: null, fix: cur, nearest, nearestCt, ctCount: S.vehicles?.length ?? null };
   }
 
   // ---------- Transfers ----------
@@ -412,7 +416,10 @@
       return;
     }
     if (!r.sys) {
-      card.innerHTML = `<div class="empty"><h2>Not on a train line</h2><p class="muted">You don't appear to be on BART${S.key511 ? " or Caltrain" : ""} right now.${r.nearest ? ` Nearest BART station: <strong>${esc(r.nearest.name)}</strong>, ${(r.nearest.d / 1000).toFixed(1)} km away.` : ""}</p>${!S.key511 && S.mode !== "bart" ? `<p class="muted">Caltrain detection is off until you add a 511 key in Settings.</p>` : ""}</div>`;
+      const km = (d) => (d / 1000).toFixed(1) + " km";
+      const fuzzy = r.fix?.acc > 500 ? `<p class="warn">Your location is only accurate to about ${km(r.fix.acc)}. Laptops and tethered connections often can't place you precisely; a phone with GPS works best.</p>` : "";
+      const ctLine = r.ctCount === 0 ? " 511 reports no Caltrain trains running right now." : r.nearestCt ? ` Nearest Caltrain: <strong>${esc(r.nearestCt.train)}</strong>, ${km(r.nearestCt.d)} away${r.nearestCt.age != null ? ` (position ${r.nearestCt.age < 90 ? r.nearestCt.age + " s" : Math.round(r.nearestCt.age / 60) + " min"} old)` : ""}.` : "";
+      card.innerHTML = `<div class="empty">${fuzzy}<h2>Not on a train line</h2><p class="muted">You don't appear to be on BART${S.key511 ? " or Caltrain" : ""} right now.${r.nearest ? ` Nearest BART station: <strong>${esc(r.nearest.name)}</strong>, ${km(r.nearest.d)} away.` : ""}${ctLine}</p>${!S.key511 && S.mode !== "bart" ? `<p class="muted">Caltrain detection is off until you add a 511 key in Settings.</p>` : ""}</div>`;
       return;
     }
     const sysName = r.sys === "bart" ? "BART" : "Caltrain";
