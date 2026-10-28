@@ -385,8 +385,6 @@
     const main = $("#main");
     $("#start").hidden = S.started;
     main.hidden = !S.started;
-    $("#mode").value = S.mode;
-    $("#key511").value = S.key511;
 
     // Status chips
     const cur = S.fixes[S.fixes.length - 1];
@@ -490,13 +488,20 @@
   $("#go").addEventListener("click", start);
   $("#refresh").addEventListener("click", () => tick(true));
   $("#mode").addEventListener("change", (e) => { S.mode = e.target.value; S.lock = null; store.set("ti.mode", S.mode); tick(true); });
-  $("#keyform").addEventListener("submit", (e) => {
-    e.preventDefault();
-    S.key511 = $("#key511").value.trim(); store.set("ti.key511", S.key511);
-    S.vehAt = 0; S.ctErr = null; $("#keysaved").hidden = false;
+  // Fill settings once on load; redraws never touch them, so typing isn't overwritten.
+  $("#mode").value = S.mode;
+  $("#key511").value = S.key511;
+  function saveKey(refresh) {
+    const k = $("#key511").value.trim();
+    if (k === S.key511) return;
+    S.key511 = k; store.set("ti.key511", k);
+    S.vehAt = 0; S.visitsAt = 0; S.ctErr = null; $("#keysaved").hidden = false;
     setTimeout(() => ($("#keysaved").hidden = true), 2000);
-    tick(true);
-  });
+    if (refresh) tick(true);
+  }
+  $("#key511").addEventListener("input", () => saveKey(false));
+  $("#key511").addEventListener("change", () => saveKey(true));
+  $("#keyform").addEventListener("submit", (e) => { e.preventDefault(); saveKey(true); tick(true); });
   render();
   if (store.get("ti.started", false) || sim()) start();
 })();
