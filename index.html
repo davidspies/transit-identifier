@@ -1,1 +1,142 @@
-<!doctype html><title>Transit Identifier</title><p>Building…</p>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#eef2f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d141b" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Transit Identifier</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+/* Layout: one narrow column, a route strip down the left of the stop list, like a line diagram on a platform sign. */
+:root {
+  --bg: #eef2f5; --surface: #ffffff; --fg: #15212c; --muted: #5a6a78; --rule: #d3dce4;
+  --accent: #0b6a94; --ok: #23784a; --warnc: #8a5a00; --bad: #b3261e;
+  --display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d141b; --surface: #16202a; --fg: #e4ebf1; --muted: #93a3b1; --rule: #273541;
+    --accent: #5cb8e6; --ok: #5cc48a; --warnc: #e0b050; --bad: #ff8a80; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--fg); font: 16px/1.45 var(--body);
+  padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  -webkit-text-size-adjust: 100%;
+}
+.wrap { max-width: 34rem; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+header h1 { font: 700 1.5rem/1 var(--display); letter-spacing: .02em; text-transform: uppercase; margin: 0; }
+.btn {
+  font: 600 .95rem/1 var(--body); color: var(--fg); background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 999px; padding: .6rem 1rem; cursor: pointer;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.btn:focus-visible, .alt:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.muted { color: var(--muted); }
+.small { font-size: .85rem; }
+
+#status { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 500 .75rem/1 var(--mono); padding: .4rem .55rem; border-radius: 6px; border: 1px solid var(--rule); background: var(--surface); }
+.chip.ok { color: var(--ok); } .chip.wait { color: var(--muted); } .chip.bad { color: var(--bad); }
+
+.intro { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 20px; display: grid; gap: 12px; }
+.intro h2 { font: 700 2rem/1.05 var(--display); margin: 0; text-wrap: balance; }
+.intro p { margin: 0; }
+
+#result { display: grid; gap: 12px; }
+.train { border-left: 8px solid var(--line, var(--accent)); padding: 4px 0 4px 14px; display: grid; gap: 4px; }
+.eyebrow { margin: 0; font: 600 .72rem/1 var(--body); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.train h2 { margin: 0; font: 700 2.1rem/1.02 var(--display); text-wrap: balance; }
+.train .sub { margin: 0; color: var(--muted); }
+.actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.warn { margin: 0; padding: .6rem .8rem; border-radius: 8px; background: var(--surface); border: 1px solid var(--rule); color: var(--warnc); font-size: .9rem; }
+
+.stops { list-style: none; margin: 0; padding: 6px 0; background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; }
+.stop { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; min-height: 56px; position: relative; padding-right: 14px; }
+.stop::before { content: ""; position: absolute; left: 15px; width: 6px; top: 0; bottom: 0; background: var(--line); }
+.stop:first-child::before { top: 50%; }
+.stop:last-child::before { bottom: 50%; }
+.dot { grid-column: 1; justify-self: center; width: 16px; height: 16px; border-radius: 50%; background: var(--surface); border: 4px solid var(--line); position: relative; z-index: 1; }
+.stop.next .dot { width: 22px; height: 22px; border-width: 6px; }
+.name { font-weight: 500; padding: 8px 8px 8px 6px; display: grid; }
+.stop.next .name { font-weight: 600; font-size: 1.1rem; }
+.name small, .when small { font-size: .75rem; color: var(--muted); font-weight: 400; }
+.when { text-align: right; display: grid; font-variant-numeric: tabular-nums; }
+.when b { font: 500 1.05rem/1.2 var(--mono); }
+.stops + * { margin-top: 0; }
+
+.alts { display: grid; gap: 8px; }
+.alt { display: flex; gap: 12px; align-items: center; text-align: left; width: 100%; font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: .7rem .9rem; cursor: pointer; }
+.alt > span:last-child { display: grid; }
+.alt small { color: var(--muted); }
+.swatch { width: 10px; align-self: stretch; border-radius: 3px; background: var(--line); flex: none; }
+.empty h2 { font: 700 1.8rem/1.05 var(--display); margin: 0 0 6px; }
+.empty p { margin: 0 0 8px; }
+
+details { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 14px 16px; }
+summary { font-weight: 600; cursor: pointer; }
+.settings { display: grid; gap: 14px; margin-top: 12px; }
+label { display: grid; gap: 6px; font-size: .9rem; font-weight: 500; }
+select, input { font: 400 1rem var(--body); color: var(--fg); background: var(--bg); border: 1px solid var(--rule); border-radius: 8px; padding: .6rem .7rem; width: 100%; min-width: 0; }
+.row { display: flex; gap: 8px; }
+.row input { flex: 1; font-family: var(--mono); font-size: .9rem; }
+footer { font-size: .8rem; color: var(--muted); }
+footer a, .settings a, .intro a { color: var(--accent); }
+@media (prefers-reduced-motion: no-preference) { .stop.next .dot { animation: pulse 2s ease-in-out infinite; } }
+@keyframes pulse { 50% { transform: scale(1.12); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Transit Identifier</h1>
+    <button id="refresh" class="btn" type="button">Refresh</button>
+  </header>
+
+  <section id="start" class="intro">
+    <h2>Which train am I on?</h2>
+    <p>This uses your location and live BART and Caltrain data to work out which train you're riding, then shows when you'll reach each stop.</p>
+    <p class="muted small">Your location stays on your phone. It's only compared with train positions and schedules.</p>
+    <div><button id="go" class="btn primary" type="button">Find my train</button></div>
+  </section>
+
+  <div id="main" hidden>
+    <div class="wrap">
+      <div id="status"></div>
+      <section id="result" aria-live="polite"></section>
+    </div>
+  </div>
+
+  <details>
+    <summary>Settings</summary>
+    <div class="settings">
+      <label for="mode">Look for
+        <select id="mode">
+          <option value="auto">BART and Caltrain</option>
+          <option value="bart">BART only</option>
+          <option value="ct">Caltrain only</option>
+        </select>
+      </label>
+      <form id="keyform">
+        <label for="key511">511.org API key (needed for Caltrain)
+          <span class="row"><input id="key511" autocomplete="off" spellcheck="false" placeholder="Paste your key"><button class="btn primary" type="submit">Save</button></span>
+        </label>
+        <p class="muted small" style="margin:.5rem 0 0">Get a free key at <a href="https://511.org/open-data/token" target="_blank" rel="noopener">511.org/open-data/token</a>. It's saved on this phone only. <span id="keysaved" hidden>Saved.</span></p>
+      </form>
+    </div>
+  </details>
+
+  <footer>Live data from BART and 511.org. GPS is unreliable in tunnels (Market St, Transbay Tube), so matches there can lag.</footer>
+</div>
+<script src="logic.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
