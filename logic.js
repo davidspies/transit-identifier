@@ -170,6 +170,19 @@
 
   // ---------- Caltrain (511 SIRI) ----------
 
+  // Trips that cross midnight belong to the previous service day, and feeds sometimes stamp
+  // their predictions with the wrong date. Pull any time 12+ hours off back to the nearest day.
+  function fixDay(t, now = Date.now()) {
+    if (!isFinite(t)) return t;
+    while (t - now > 12 * 36e5) t -= 24 * 36e5;
+    while (now - t > 12 * 36e5) t += 24 * 36e5;
+    return t;
+  }
+  function parseTime(...xs) {
+    for (const x of xs) { const t = Date.parse(x); if (isFinite(t)) return fixDay(t); }
+    return NaN;
+  }
+
   function arr(x) { return x == null ? [] : Array.isArray(x) ? x : [x]; }
 
   function parse511(text) {
@@ -191,10 +204,10 @@
           line: v.PublishedLineName || v.LineRef || "",
           dir: (v.DirectionRef || "").toString().toUpperCase().startsWith("N") ? "N" : (v.DirectionRef ? "S" : ""),
           dest: v.DestinationName || "",
-          recordedAt: act.RecordedAtTime ? Date.parse(act.RecordedAtTime) : null,
+          recordedAt: act.RecordedAtTime ? parseTime(act.RecordedAtTime) : null,
           calls: [v.MonitoredCall, ...arr(v.OnwardCalls?.OnwardCall)]
             .filter(Boolean)
-            .map((c) => ({ name: cleanStop(c.StopPointName), time: Date.parse(c.ExpectedArrivalTime || c.AimedArrivalTime || c.ExpectedDepartureTime || c.AimedDepartureTime) }))
+            .map((c) => ({ name: cleanStop(c.StopPointName), time: parseTime(c.ExpectedArrivalTime, c.ExpectedDepartureTime, c.AimedArrivalTime, c.AimedDepartureTime) }))
             .filter((c) => isFinite(c.time)),
         });
       }
@@ -210,7 +223,7 @@
         const mvj = v.MonitoredVehicleJourney || {};
         const ref = mvj.FramedVehicleJourneyRef?.DatedVehicleJourneyRef || mvj.VehicleRef;
         const c = mvj.MonitoredCall || {};
-        const time = Date.parse(c.ExpectedArrivalTime || c.AimedArrivalTime || c.ExpectedDepartureTime || c.AimedDepartureTime);
+        const time = parseTime(c.ExpectedArrivalTime, c.ExpectedDepartureTime, c.AimedArrivalTime, c.AimedDepartureTime);
         if (!ref || !isFinite(time)) continue;
         (byTrain[ref] ||= []).push({ name: cleanStop(c.StopPointName), time });
       }
@@ -311,7 +324,7 @@
     return { candidates: out, nearestD: out[0]?.d ?? null, direction: dirWanted ? "known" : "unknown" };
   }
 
-  const api = { dist, project, bearing, locateOnRoute, etdFor, bartCandidates, bartStops, parse511, vehiclesFrom511, stopVisitsFrom511, cleanStop, caltrainCandidates, stopCoordsFrom511 };
+  const api = { dist, project, bearing, locateOnRoute, etdFor, bartCandidates, bartStops, parse511, vehiclesFrom511, stopVisitsFrom511, cleanStop, caltrainCandidates, stopCoordsFrom511, fixDay };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.TI = api;
 })(typeof window !== "undefined" ? window : globalThis);
