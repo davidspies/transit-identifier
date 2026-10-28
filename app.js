@@ -299,7 +299,7 @@
       const d = TI.dist(cur, v);
       if (!nearestCt || d < nearestCt.d) nearestCt = { train: v.train, d, age: v.recordedAt ? Math.round((Date.now() - v.recordedAt) / 1000) : null };
     }
-    return { sys: null, fix: cur, nearest, nearestCt, ctCount: S.vehicles?.length ?? null };
+    return { sys: null, fix: cur, nearest, nearestCt, ctCount: S.vehicles || S.visits ? ctTrainList().length : null };
   }
 
   // ---------- Picked by hand (no location needed) ----------
@@ -334,9 +334,24 @@
     return calls.filter((c) => c.time > Date.now() - 60e3).map((c) => ({ key: "ct:" + c.name, name: c.name, time: c.time, estimated: false }));
   }
 
+  // Every Caltrain we know about, from position reports or live stop predictions (511 sometimes sends only one).
+  function ctTrainList() {
+    const byTrain = {};
+    for (const v of S.vehicles || []) byTrain[v.train] = { ...v };
+    for (const t of Object.keys(S.visits || {})) byTrain[t] ||= { train: t, line: "", dir: "", dest: "", calls: [] };
+    for (const v of Object.values(byTrain)) {
+      const stops = caltrainStops(v.train, v);
+      v.nextStop = stops[0] || null;
+      const a = S.ctStops?.[stops[0]?.name], b = S.ctStops?.[stops[1]?.name];
+      if (!v.dir && a && b) v.dir = b.lat > a.lat ? "N" : "S";
+      if (!v.dest && stops.length) v.dest = stops[stops.length - 1].name;
+    }
+    return Object.values(byTrain).filter((v) => v.nextStop || isFinite(v.lat));
+  }
+
   function manualCaltrain(cur) {
     const train = S.lock.train;
-    const v = (S.vehicles || []).find((x) => x.train === train);
+    const v = ctTrainList().find((x) => x.train === train);
     const dirWord = v?.dir === "N" ? "Northbound" : v?.dir === "S" ? "Southbound" : "";
     return {
       sys: "ct", ident: { sys: "ct", train }, fix: cur, direction: "known", manual: true, vehicle: v || { calls: [] },
@@ -360,11 +375,11 @@
     let ct = "";
     if (S.mode !== "bart") {
       if (!S.key511) ct = `<p class="muted small">Add a 511 key in Settings to list Caltrain trains.</p>`;
-      else if (!S.vehicles) ct = `<p class="muted small">${S.ctErr ? esc(S.ctErr) : "Loading Caltrain trains…"}</p>`;
+      else if (!S.vehicles && !S.visits) ct = `<p class="muted small">${S.ctErr ? esc(S.ctErr) : "Loading Caltrain trains…"}</p>`;
       else {
-        const list = S.vehicles.slice().sort((a, b) => (a.dir + a.train).localeCompare(b.dir + b.train, undefined, { numeric: true }));
+        const list = ctTrainList().sort((a, b) => (a.dir + a.train).localeCompare(b.dir + b.train, undefined, { numeric: true }));
         ct = list.length ? `<div class="alts">${list.map((v) => {
-          const next = caltrainStops(v.train, v)[0];
+          const next = v.nextStop;
           return `<button class="alt mct" data-train="${esc(v.train)}" style="--line:#c8102e"><span class="swatch"></span><span>Caltrain ${esc(v.train)}<small>${v.dir === "N" ? "Northbound" : v.dir === "S" ? "Southbound" : ""}${v.line ? " · " + esc(v.line) : ""}${next ? ` · next: ${esc(next.name)} ${clock(next.time)}` : ""}</small></span><span class="pick">This one</span></button>`;
         }).join("")}</div>` : `<p class="muted small">511 reports no Caltrain trains running right now.</p>`;
       }
