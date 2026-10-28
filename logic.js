@@ -59,13 +59,14 @@
   }
 
   function estMatchesRoute(destAbbr, est, route) {
-    if (destAbbr && destAbbr.toUpperCase() === route.destination.toUpperCase()) return true;
-    return (
-      est.hexcolor && route.hexcolor &&
-      est.hexcolor.toUpperCase() === route.hexcolor.toUpperCase() &&
-      est.direction && route.direction &&
-      est.direction.toLowerCase() === route.direction.toLowerCase()
-    );
+    const destOk = !!destAbbr && destAbbr.toUpperCase() === route.destination.toUpperCase();
+    // Several lines can share a terminus (e.g. Orange and Red both end at Richmond), so line color decides.
+    if (est.hexcolor && route.hexcolor) {
+      if (est.hexcolor.toUpperCase() !== route.hexcolor.toUpperCase()) return false;
+      const dirOk = !!est.direction && !!route.direction && est.direction.toLowerCase() === route.direction.toLowerCase();
+      return destOk || dirOk;
+    }
+    return destOk;
   }
 
   // All ETD minutes (departures) at station `abbr` for trains running `route`.
@@ -118,33 +119,31 @@
       x.sign = sign;
       if (sign > 0) moving.push(x);
     }
-    if (moving.length) { near = moving; direction = "known"; }
-    else if (near.some((x) => x.sign < 0)) { near = near.filter((x) => x.sign >= 0); direction = near.length ? "unknown" : "none"; }
+    if (moving.length) direction = "known";
 
+    // One candidate per (route, rank): rank 0 is the first train due at the next
+    // station, rank 1 the one behind it. Opposite-direction routes are kept but ranked low.
     const cands = [];
     for (const x of near) {
       const cfg = x.route.stations;
       const seg = x.loc;
       const atStation = seg.t > 0.97 && seg.len * (1 - seg.t) < 250;
       const nextIdx = seg.i + 1;
-      const nextAbbr = cfg[nextIdx];
-      const ests = etdFor(data.etd, nextAbbr, x.route);
-      if (!ests.length) continue;
+      const ests = etdFor(data.etd, cfg[nextIdx], x.route);
       const remain = seg.len * (1 - seg.t);
       const expectMin = remain / 15 / 60; // ~54 km/h average
-      const first = ests[0];
-      cands.push({
-        route: x.route,
-        nextIdx,
-        atStation,
-        offTrack: seg.d,
-        minutesToNext: first.minutes,
-        cars: first.cars,
-        plausible: first.minutes <= expectMin + 6,
+      const dirScore = x.sign > 0 ? 2 : x.sign === 0 ? 1 : 0;
+      ests.slice(0, opts.ranks ?? 2).forEach((e, rank) => {
+        cands.push({
+          route: x.route, nextIdx, atStation, offTrack: seg.d, rank, dirScore,
+          minutesToNext: e.minutes, cars: e.cars,
+          plausible: e.minutes <= expectMin + 6,
+        });
       });
     }
-    // The train we're on reaches the next station soonest among trains on our track.
-    cands.sort((a, b) => (b.plausible - a.plausible) || (a.minutesToNext - b.minutesToNext));
+    // The train we're on reaches the next station soonest among trains on our track, going our way.
+    cands.sort((a, b) =>
+      (b.dirScore - a.dirScore) || (a.rank - b.rank) || (b.plausible - a.plausible) || (a.minutesToNext - b.minutesToNext));
     return { candidates: cands, nearestD: dmin, direction };
   }
 
@@ -244,11 +243,8 @@
     let list = vehicles
       .map((v) => ({ ...v, d: dist(p, v) }))
       .filter((v) => v.d <= maxD && (!opts.train || v.train === opts.train));
-    if (dirWanted) {
-      const same = list.filter((v) => !v.dir || v.dir === dirWanted);
-      if (same.length) list = same;
-    }
-    list.sort((a, b) => a.d - b.d);
+    for (const v of list) v.dirOk = !dirWanted || !v.dir || v.dir === dirWanted;
+    list.sort((a, b) => (b.dirOk - a.dirOk) || (a.d - b.d));
     return { candidates: list, nearestD: list[0]?.d ?? null, direction: dirWanted ? "known" : "unknown" };
   }
 

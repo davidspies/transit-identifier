@@ -171,7 +171,7 @@
   function decide(cur, prev) {
     let bart = null, ct = null;
     if (S.mode !== "ct" && S.bart && S.etd) {
-      const opts = S.lock?.sys === "bart" ? { routeId: S.lock.routeId, maxD: 3000 } : {};
+      const opts = S.lock?.sys === "bart" ? { routeId: S.lock.routeId, maxD: 3000, ranks: 3 } : {};
       bart = TI.bartCandidates(cur, prev, { ...S.bart, etd: S.etd }, opts);
     }
     if (S.mode !== "bart" && S.vehicles) {
@@ -190,17 +190,32 @@
     else sys = cd < 500 || cd < bd * 1.5 ? "ct" : "bart";
 
     if (sys === "bart" && bart?.candidates.length) {
-      const top = bart.candidates[0];
+      const etaOf = (c) => S.etdAt + c.minutesToNext * 60e3;
+      let top = bart.candidates[0];
+      if (S.lock?.sys === "bart" && S.lock.eta) {
+        // Follow the locked train: the estimate on its line closest to where we last saw it.
+        top = bart.candidates.reduce((a, b) => (Math.abs(etaOf(b) - S.lock.eta) < Math.abs(etaOf(a) - S.lock.eta) ? b : a));
+        S.lock.eta = etaOf(top);
+      }
+      const name = (c) => `${titleCase(c.route.color)} to ${S.bart.stations[c.route.destination]?.name || c.route.destination}`;
+      const nextName = (c) => S.bart.stations[c.route.stations[c.nextIdx]]?.name || "next stop";
+      const why = (c) => {
+        if (c.dirScore < top.dirScore) return "Opposite direction";
+        if (c.route.routeID === top.route.routeID) return c.minutesToNext > top.minutesToNext ? "Train behind this one" : "Train ahead of this one";
+        if (c.rank > 0) return "Second train on this line";
+        return "Another line on this track";
+      };
       const stops = TI.bartStops(top, { ...S.bart, etd: S.etd }).map((s) => ({ name: s.name, time: S.etdAt + s.minutes * 60e3, estimated: s.estimated }));
       return {
         sys: "bart", fix: cur, direction: bart.direction, stops,
         title: `${titleCase(top.route.color)} line to ${S.bart.stations[top.route.destination]?.name || top.route.destination}`,
         sub: [top.cars ? `${top.cars}-car train` : null, top.atStation ? "Stopped at station" : null].filter(Boolean).join(" · "),
         color: top.route.hexcolor, plausible: top.plausible,
-        lockKey: { sys: "bart", routeId: top.route.routeID },
-        alts: bart.candidates.slice(1).filter((c) => c.route.routeID !== top.route.routeID).slice(0, 3).map((c) => ({
-          label: `${titleCase(c.route.color)} to ${S.bart.stations[c.route.destination]?.name || c.route.destination}`,
-          detail: `next stop in ${c.minutesToNext} min`, color: c.route.hexcolor, lock: { sys: "bart", routeId: c.route.routeID },
+        lockKey: { sys: "bart", routeId: top.route.routeID, eta: etaOf(top) },
+        alts: bart.candidates.filter((c) => c !== top).slice(0, 3).map((c) => ({
+          label: name(c), why: why(c),
+          detail: `${nextName(c)} in ${c.minutesToNext} min`, color: c.route.hexcolor,
+          lock: { sys: "bart", routeId: c.route.routeID, eta: etaOf(c) },
         })),
       };
     }
@@ -218,7 +233,9 @@
         posAge: v.recordedAt ? Math.round((Date.now() - v.recordedAt) / 1000) : null,
         lockKey: { sys: "ct", train: v.train },
         alts: ct.candidates.slice(1, 4).map((c) => ({
-          label: `Caltrain ${c.train}`, detail: `${c.dir === "N" ? "Northbound" : "Southbound"} · ${Math.round(c.d)} m away`, color: "#c8102e", lock: { sys: "ct", train: c.train },
+          label: `Caltrain ${c.train}`, why: c.dirOk ? "Nearby train" : "Opposite direction",
+          detail: `${c.dir === "N" ? "Northbound" : "Southbound"} · ${c.d < 1000 ? Math.round(c.d) + " m" : (c.d / 1000).toFixed(1) + " km"} away`,
+          color: "#c8102e", lock: { sys: "ct", train: c.train },
         })),
       };
     }
@@ -284,7 +301,7 @@
       </div>
       ${warn.map((w) => `<p class="warn">${esc(w)}</p>`).join("")}
       ${r.stops.length ? `<ol class="stops" style="--line:${esc(r.color)}">${rows}</ol>` : `<p class="muted">No upcoming stop times available for this train yet.</p>`}
-      ${!S.lock && r.alts?.length ? `<div class="alts"><p class="eyebrow">Or are you on</p>${r.alts.map((a, i) => `<button class="alt" data-i="${i}" style="--line:${esc(a.color)}"><span class="swatch"></span><span>${esc(a.label)}<small>${esc(a.detail)}</small></span></button>`).join("")}</div>` : ""}
+      ${r.alts?.length ? `<div class="alts"><p class="eyebrow">Other possibilities</p>${r.alts.map((a, i) => `<button class="alt" data-i="${i}" style="--line:${esc(a.color)}"><span class="swatch"></span><span><span class="why">${esc(a.why)}</span>${esc(a.label)}<small>${esc(a.detail)}</small></span><span class="pick">Switch</span></button>`).join("")}</div>` : ""}
     `;
     $("#lock")?.addEventListener("click", () => { S.lock = r.lockKey; tick(); });
     $("#unlock")?.addEventListener("click", () => { S.lock = null; tick(); });
