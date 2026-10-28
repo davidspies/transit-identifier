@@ -231,31 +231,74 @@
       .trim();
   }
 
-  // Pick the Caltrain vehicle nearest to p, respecting travel direction when known.
+  // Station coordinates from 511 "stops" (one entry per platform), keyed by cleaned name.
+  function stopCoordsFrom511(j) {
+    const pts = arr(j?.Contents?.dataObjects?.ScheduledStopPoint);
+    const acc = {};
+    for (const sp of pts) {
+      const lat = parseFloat(sp.Location?.Latitude), lon = parseFloat(sp.Location?.Longitude);
+      const name = cleanStop(sp.Name);
+      if (!name || !isFinite(lat) || !isFinite(lon)) continue;
+      const a = (acc[name] ||= { lat: 0, lon: 0, n: 0 });
+      a.lat += lat; a.lon += lon; a.n++;
+    }
+    const out = {};
+    for (const [k, a] of Object.entries(acc)) out[k] = { lat: a.lat / a.n, lon: a.lon / a.n };
+    return out;
+  }
+
+  // Which Caltrain could you be on? Two independent signals, best one wins per train:
+  //  - position: 511's reported train location, discounted for how stale it is;
+  //  - schedule: a train due at its next station in t seconds should be ~t x 20 m/s short of it.
+  // opts: {visits: {train: [{name,time}]}, stops: {name:{lat,lon}}, train, maxD, now}
   function caltrainCandidates(p, prev, vehicles, opts = {}) {
-    const maxD = opts.maxD ?? 1500;
+    const maxD = (opts.maxD ?? 1500) + Math.min(p.acc || 0, 3000);
+    const now = opts.now ?? Date.now();
     let dirWanted = null;
     if (prev && Math.abs(p.lat - prev.lat) > 0.0006) dirWanted = p.lat > prev.lat ? "N" : "S";
     else if (p.heading != null && (p.speed ?? 0) > 3) {
       const c = Math.cos((p.heading * Math.PI) / 180);
       if (Math.abs(c) > 0.3) dirWanted = c > 0 ? "N" : "S";
     }
-    // Allow for how far a train can travel since its position was recorded (~35 m/s top speed)
-    // and for how fuzzy our own fix is.
-    const now = opts.now ?? Date.now();
-    const slack = (v) => {
-      const age = v.recordedAt ? Math.max(0, (now - v.recordedAt) / 1000) : 120;
-      return maxD + Math.min(age, 300) * 35 + Math.min(p.acc || 0, 3000);
-    };
-    let list = vehicles
-      .map((v) => ({ ...v, d: dist(p, v) }))
-      .filter((v) => v.d <= slack(v) && (!opts.train || v.train === opts.train));
-    for (const v of list) v.dirOk = !dirWanted || !v.dir || v.dir === dirWanted;
-    list.sort((a, b) => (b.dirOk - a.dirOk) || (a.d - b.d));
-    return { candidates: list, nearestD: list[0]?.d ?? null, direction: dirWanted ? "known" : "unknown" };
+    const visits = opts.visits || {}, stops = opts.stops || {};
+    const byTrain = {};
+    for (const v of vehicles || []) byTrain[v.train] = { ...v };
+    for (const t of Object.keys(visits)) byTrain[t] ||= { train: t, line: "", dir: "", dest: "", calls: [], recordedAt: null };
+
+    const out = [];
+    for (const v of Object.values(byTrain)) {
+      if (opts.train && v.train !== opts.train) continue;
+      let posScore = Infinity, etaScore = Infinity, realD = null, next = null;
+      if (isFinite(v.lat) && isFinite(v.lon) && (v.lat || v.lon)) {
+        realD = dist(p, v);
+        const age = v.recordedAt ? Math.max(0, (now - v.recordedAt) / 1000) : 120;
+        posScore = Math.max(0, realD - Math.min(age, 300) * 22);
+      }
+      const list = (visits[v.train] || (v.calls?.length >= 2 ? v.calls : [])).filter((c) => c.time > now - 30e3);
+      if (list.length) {
+        next = list[0];
+        const N = stops[next.name];
+        const secs = (next.time - now) / 1000;
+        if (N && secs < 25 * 60) {
+          const dN = dist(p, N);
+          etaScore = Math.abs(dN - Math.max(0, secs) * 20);
+          const N2 = list[1] && stops[list[1].name];
+          if (N2) {
+            if (!v.dir) v.dir = N2.lat > N.lat ? "N" : "S";
+            // You should be before the next station, not past it.
+            if (dist(p, N2) < dist(N, N2) - 500) etaScore += 3000;
+          }
+        }
+      }
+      const score = Math.min(posScore, etaScore);
+      if (score > maxD) continue;
+      out.push({ ...v, d: score, realD, posScore, etaScore, next, dirOk: !dirWanted || !v.dir || v.dir === dirWanted });
+    }
+    out.sort((a, b) => (b.dirOk - a.dirOk) || (a.d - b.d));
+    return { candidates: out, nearestD: out[0]?.d ?? null, direction: dirWanted ? "known" : "unknown" };
   }
 
-  const api = { dist, project, bearing, locateOnRoute, etdFor, bartCandidates, bartStops, parse511, vehiclesFrom511, stopVisitsFrom511, cleanStop, caltrainCandidates };
+  const api = { dist, project, bearing, locateOnRoute, etdFor, bartCandidates, bartStops, parse511, vehiclesFrom511, stopVisitsFrom511, cleanStop, caltrainCandidates, stopCoordsFrom511 };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.TI = api;
 })(typeof window !== "undefined" ? window : globalThis);

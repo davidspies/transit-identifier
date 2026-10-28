@@ -13,6 +13,7 @@
 
   const S = {
     mode: store.get("ti.mode", "auto"),
+    debug: store.get("ti.debug", false),
     key511: store.get("ti.key511", ""),
     fixes: [],
     bart: null,          // {stations, routes}
@@ -79,10 +80,10 @@
     } catch (e) { S.etdErr = e.message || String(e); }
   }
 
-  async function get511(endpoint) {
+  async function get511(endpoint, param = "agency") {
     if (!S.key511) throw new Error("no key");
     if (!budgetOk()) throw new Error("511 hourly limit reached, waiting");
-    const u = `${API511}${endpoint}?api_key=${encodeURIComponent(S.key511)}&agency=CT&format=json`;
+    const u = `${API511}${endpoint}?api_key=${encodeURIComponent(S.key511)}&${param}=CT&format=json`;
     spend();
     const r = await fetch(u, { signal: AbortSignal.timeout?.(15e3) });
     if (r.status === 401 || r.status === 403) throw new Error("511 rejected the key");
@@ -93,7 +94,7 @@
 
   async function refreshVehicles(force) {
     const locked = S.lock?.sys === "ct";
-    const every = locked ? 6e5 : 120e3; // once locked, positions matter less
+    const every = locked ? 6e5 : 240e3; // stop predictions do most of the work; positions are a cross-check
     if (!force && Date.now() - S.vehAt < every) return;
     try {
       S.vehicles = TI.vehiclesFrom511(await get511("VehicleMonitoring"));
@@ -106,7 +107,18 @@
     try {
       S.visits = TI.stopVisitsFrom511(await get511("StopMonitoring"));
       S.visitsAt = Date.now();
-    } catch (e) { S.ctErr = e.message; }
+    } catch (e) { S.ctErr = e.message === "Failed to fetch" ? "Couldn't reach 511.org" : e.name === "TimeoutError" ? "511.org timed out" : e.message; }
+  }
+
+  // Caltrain station locations; they rarely change, so keep them for a week.
+  async function loadCtStops() {
+    if (S.ctStops) return;
+    const cached = store.get("ti.ctStops", null);
+    if (cached && Date.now() - cached.at < 7 * DAY && Object.keys(cached.data).length) { S.ctStops = cached.data; return; }
+    try {
+      const data = TI.stopCoordsFrom511(await get511("stops", "operator_id"));
+      if (Object.keys(data).length) { S.ctStops = data; store.set("ti.ctStops", { at: Date.now(), data }); }
+    } catch (e) { /* matching falls back to train positions */ }
   }
 
   // ---------- Location ----------
@@ -164,7 +176,10 @@
       const update = () => { S.lastResult = decide(cur, cur ? prevFix(cur) : null); render(); };
       const jobs = [];
       if (wantBart && S.bart) jobs.push(refreshEtd(force).then(update));
-      if (wantCt && (cur || S.manualOpen || S.lock?.manual)) jobs.push(refreshVehicles(force).then(update));
+      if (wantCt && (cur || S.manualOpen || S.lock?.manual)) {
+        jobs.push(refreshVehicles(force).then(update));
+        jobs.push(loadCtStops().then(() => refreshVisits(force)).then(update));
+      }
       await Promise.all(jobs);
       update();
       const needVisits = S.plan.some((l) => l.sys === "ct") || !!S.manualOpen ||
@@ -186,20 +201,23 @@
         : S.allAlts ? { maxD: 2500, ranks: 4, spread: 1500 } : {};
       bart = TI.bartCandidates(cur, prev, { ...S.bart, etd: S.etd }, opts);
     }
-    if (S.mode !== "bart" && S.vehicles) {
+    if (S.mode !== "bart" && (S.vehicles || S.visits)) {
       const opts = S.lock?.sys === "ct" ? { train: S.lock.train, maxD: 5000 } : S.allAlts ? { maxD: 6000 } : {};
-      ct = TI.caltrainCandidates(cur, prev, S.vehicles, opts);
+      ct = TI.caltrainCandidates(cur, prev, S.vehicles, { ...opts, visits: S.visits || {}, stops: S.ctStops || {} });
     }
-    const bd = bart?.candidates.length ? bart.candidates[0].offTrack : Infinity;
+    // A BART match with no train plausibly due counts for less.
+    const bd = bart?.candidates.length ? bart.candidates[0].offTrack * (bart.candidates[0].plausible ? 1 : 3) : Infinity;
     const cd = ct?.candidates.length ? ct.candidates[0].d : Infinity;
 
     // A system still loading might be the better match, so only commit early when we're clearly on the other one.
     const bartPending = S.mode !== "ct" && !S.etd && !S.etdErr;
-    const ctPending = S.mode !== "bart" && !!S.key511 && !S.vehicles && !S.ctErr;
+    const ctPending = S.mode !== "bart" && !!S.key511 && !(S.vehicles && S.visits) && !S.ctErr;
     if (!S.lock && S.mode === "auto") {
       if (ctPending && !(bd <= 300)) return { sys: null, fix: cur, waiting: "Caltrain" };
       if (bartPending && !(cd <= 500)) return { sys: null, fix: cur, waiting: "BART" };
     }
+
+    S.dbg = { bart, ct, bd, cd };
 
     let sys = null;
     if (S.lock) sys = S.lock.sys;
@@ -242,7 +260,7 @@
     }
     if (sys === "ct" && ct?.candidates.length) {
       const v = ct.candidates[0];
-      let calls = v.calls;
+      let calls = v.calls || [];
       if (calls.length < 2 && S.visits?.[v.train]) calls = S.visits[v.train];
       const stops = calls.filter((c) => c.time > Date.now() - 60e3).map((c) => ({ key: "ct:" + c.name, name: c.name, time: c.time, estimated: false }));
       const dirWord = v.dir === "N" ? "Northbound" : v.dir === "S" ? "Southbound" : "";
@@ -250,13 +268,13 @@
         sys: "ct", ident: { sys: "ct", train: v.train }, fix: cur, direction: ct.direction, stops, vehicle: v,
         title: `Caltrain ${v.train}`,
         sub: [dirWord, v.line, v.dest ? `to ${TI.cleanStop(v.dest)}` : null].filter(Boolean).join(" · "),
-        color: "#c8102e", plausible: v.d < 800,
-        posAge: v.recordedAt ? Math.round((Date.now() - v.recordedAt) / 1000) : null,
+        color: "#c8102e", plausible: v.d < 1000,
+        posAge: v.recordedAt && v.posScore <= v.etaScore ? Math.round((Date.now() - v.recordedAt) / 1000) : null,
         lockKey: { sys: "ct", train: v.train },
         moreAlts: true,
         alts: ct.candidates.slice(1, S.allAlts ? 99 : 4).map((c) => ({
           label: `Caltrain ${c.train}`, why: c.dirOk ? "Nearby train" : "Opposite direction",
-          detail: `${c.dir === "N" ? "Northbound" : "Southbound"} · ${c.d < 1000 ? Math.round(c.d) + " m" : (c.d / 1000).toFixed(1) + " km"} away`,
+          detail: [c.dir === "N" ? "Northbound" : c.dir === "S" ? "Southbound" : "", c.next ? `next: ${c.next.name} ${clock(c.next.time)}` : ""].filter(Boolean).join(" · "),
           color: "#c8102e", lock: { sys: "ct", train: c.train },
         })),
       };
@@ -497,6 +515,7 @@
   const ago = (ms) => { const s = Math.round((Date.now() - ms) / 1000); return s < 60 ? `${s}s ago` : `${Math.round(s / 60)} min ago`; };
 
   function render() {
+    renderDebug();
     const main = $("#main");
     $("#start").hidden = S.started;
     main.hidden = !S.started;
@@ -618,12 +637,35 @@
     card.querySelectorAll("[data-unplan]").forEach((b) => b.addEventListener("click", () => { S.plan = S.plan.slice(0, +b.dataset.unplan); render(); }));
   }
 
+  function renderDebug() {
+    const el = $("#debug");
+    el.hidden = !S.debug;
+    if (!S.debug) return;
+    const cur = S.fixes[S.fixes.length - 1];
+    const m = (d) => (isFinite(d) ? Math.round(d) + "m" : "–");
+    const lines = [];
+    lines.push(`fix ${cur ? `${cur.lat.toFixed(5)},${cur.lon.toFixed(5)} ±${Math.round(cur.acc)}m hdg ${cur.heading ?? "–"} spd ${cur.speed?.toFixed?.(1) ?? "–"}` : "none"}`);
+    lines.push(`mode ${S.mode} lock ${S.lock ? JSON.stringify(S.lock) : "none"}`);
+    const d = S.dbg || {};
+    lines.push(`BART score ${m(d.bd)} dir ${d.bart?.direction ?? "–"}`);
+    for (const c of (d.bart?.candidates || []).slice(0, 4))
+      lines.push(`  ${c.route.color} → ${c.route.destination} r${c.rank} next ${c.route.stations[c.nextIdx]} ${c.minutesToNext}min off ${m(c.offTrack)} dir ${c.dirScore}${c.plausible ? "" : " implausible"}`);
+    lines.push(`Caltrain score ${m(d.cd)} dir ${d.ct?.direction ?? "–"} · ${S.vehicles?.length ?? "–"} positions, ${S.visits ? Object.keys(S.visits).length : "–"} trains w/ predictions, ${S.ctStops ? Object.keys(S.ctStops).length : "–"} stations`);
+    for (const c of (d.ct?.candidates || []).slice(0, 4))
+      lines.push(`  #${c.train} ${c.dir || "?"} sched ${m(c.etaScore)} pos ${m(c.posScore)} (raw ${m(c.realD)})${c.next ? ` next ${c.next.name} ${clock(c.next.time)}` : ""}${c.dirOk ? "" : " wrong-dir"}`);
+    let used = 0; try { used = store.get("ti.511log", []).filter((t) => Date.now() - t < 36e5).length; } catch {}
+    lines.push(`511 requests this hour: ${used}/60`);
+    el.textContent = lines.join("\n");
+  }
+
   // ---------- Wire up ----------
   $("#go").addEventListener("click", start);
   $("#refresh").addEventListener("click", () => tick(true));
   $("#mode").addEventListener("change", (e) => { S.mode = e.target.value; S.lock = null; store.set("ti.mode", S.mode); tick(true); });
   // Fill settings once on load; redraws never touch them, so typing isn't overwritten.
   $("#mode").value = S.mode;
+  $("#debugtoggle").checked = S.debug;
+  $("#debugtoggle").addEventListener("change", (e) => { S.debug = e.target.checked; store.set("ti.debug", S.debug); render(); });
   $("#key511").value = S.key511;
   function saveKey(refresh) {
     const k = $("#key511").value.trim();

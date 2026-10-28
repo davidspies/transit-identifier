@@ -79,6 +79,9 @@ header h1 { font: 700 1.5rem/1 var(--display); letter-spacing: .02em; text-trans
 .train.leg h3 { margin: 0; font: 700 1.5rem/1.05 var(--display); }
 .linkbtn { font: 600 .85rem/1 var(--body); color: var(--accent); background: none; border: 0; padding: .4rem; cursor: pointer; }
 .hint { margin: 0; }
+#debug { margin: 0; font: 500 .7rem/1.45 var(--mono); color: var(--muted); background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 10px; overflow-x: auto; white-space: pre; }
+.check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.check input { width: auto; }
 .manual-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .manual-head h2 { margin: 0; font: 700 2rem/1.05 var(--display); }
 #result > .eyebrow { margin-top: 6px; }
@@ -130,6 +133,7 @@ footer a, .settings a, .intro a { color: var(--accent); }
     <div class="wrap">
       <div id="status"></div>
       <section id="result" aria-live="polite"></section>
+      <pre id="debug" hidden></pre>
     </div>
   </div>
 
@@ -143,6 +147,7 @@ footer a, .settings a, .intro a { color: var(--accent); }
           <option value="ct">Caltrain only</option>
         </select>
       </label>
+      <label class="check" for="debugtoggle"><input type="checkbox" id="debugtoggle"> Show matching details</label>
       <form id="keyform">
         <label for="key511">511.org API key (needed for Caltrain)
           <span class="row"><input id="key511" autocomplete="off" spellcheck="false" placeholder="Paste your key"><button class="btn primary" type="submit">Save</button></span>
