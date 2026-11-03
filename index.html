@@ -79,6 +79,10 @@ header h1 { font: 700 1.5rem/1 var(--display); letter-spacing: .02em; text-trans
 .train.leg h3 { margin: 0; font: 700 1.5rem/1.05 var(--display); }
 .linkbtn { font: 600 .85rem/1 var(--body); color: var(--accent); background: none; border: 0; padding: .4rem; cursor: pointer; }
 .hint { margin: 0; }
+#geohelp { color: var(--fg); display: grid; gap: 8px; }
+#geohelp p, #geohelp ul { margin: 0; }
+#geohelp ul { padding-left: 1.2em; display: grid; gap: 4px; }
+#geohelp .btn { justify-self: start; }
 #debug { margin: 0; font: 500 .7rem/1.45 var(--mono); color: var(--muted); background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 10px; overflow-x: auto; white-space: pre; }
 .check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .check input { width: auto; }
@@ -132,6 +136,7 @@ footer a, .settings a, .intro a { color: var(--accent); }
   <div id="main" hidden>
     <div class="wrap">
       <div id="status"></div>
+      <div id="geohelp" class="warn" hidden></div>
       <section id="result" aria-live="polite"></section>
       <pre id="debug" hidden></pre>
     </div>
@@ -157,9 +162,9 @@ footer a, .settings a, .intro a { color: var(--accent); }
     </div>
   </details>
 
-  <footer>Live data from BART and 511.org. GPS is unreliable in tunnels (Market St, Transbay Tube), so matches there can lag. · v10280017</footer>
+  <footer>Live data from BART and 511.org. GPS is unreliable in tunnels (Market St, Transbay Tube), so matches there can lag. · v11021719</footer>
 </div>
-<script src="logic.js?v=10280017"></script>
-<script src="app.js?v=10280017"></script>
+<script src="logic.js?v=11021719"></script>
+<script src="app.js?v=11021719"></script>
 </body>
 </html>

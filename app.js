@@ -157,6 +157,26 @@
     return null;
   }
 
+  // Location. Errors are kept specific, with the browser's own wording, so we can tell
+  // "blocked" from "phone has no fix" from "still waiting".
+  let watchId = null;
+  function geoError(e) {
+    const detail = e.message ? ` (${e.message})` : "";
+    if (e.code === 1) S.geoErr = { kind: "blocked", text: "Location is blocked for this site" + detail };
+    else if (e.code === 2) S.geoErr = { kind: "unavailable", text: "Your phone couldn't find a location" + detail };
+    else if (!S.fixes.length) S.geoErr = { kind: "waiting", text: "Still waiting for a GPS fix…" };
+    render();
+  }
+  function startGeo(fromTap) {
+    if (!("geolocation" in navigator)) { S.geoErr = { kind: "none", text: "This browser has no location support." }; render(); return; }
+    if (watchId != null) navigator.geolocation.clearWatch(watchId);
+    S.geoErr = null; render();
+    const opts = { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 };
+    // A one-off request made straight from a tap is the most reliable way to get the permission prompt.
+    if (fromTap) navigator.geolocation.getCurrentPosition(onFix, geoError, opts);
+    watchId = navigator.geolocation.watchPosition(onFix, geoError, opts);
+  }
+
   async function start() {
     S.started = true;
     store.set("ti.started", true);
@@ -164,11 +184,7 @@
     try { S.bart = await loadBartStatic(); } catch (e) { S.etdErr = "Couldn't load BART stations: " + (e.message || e); }
     const s = sim();
     if (s) { S.fixes = [s]; }
-    else if (!("geolocation" in navigator)) S.geoErr = "This browser has no location support.";
-    else navigator.geolocation.watchPosition(onFix, (e) => {
-      S.geoErr = e.code === 1 ? "Location is off for this site. Allow it in your browser settings, then reload." : "Waiting for a GPS fix…";
-      render();
-    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+    else startGeo(false);
     try { await navigator.wakeLock?.request("screen"); } catch {}
     tick(true);
     setInterval(() => tick(), 15e3);
@@ -548,10 +564,23 @@
     // Status chips
     const cur = S.fixes[S.fixes.length - 1];
     const chips = [];
-    chips.push(cur ? `<span class="chip ok">GPS ±${Math.round(cur.acc || 0)} m · ${ago(cur.at)}</span>` : `<span class="chip wait">${esc(S.geoErr || "Finding you…")}</span>`);
+    const ge = S.geoErr;
+    chips.push(cur ? `<span class="chip ok">GPS ±${Math.round(cur.acc || 0)} m · ${ago(cur.at)}</span>` : `<span class="chip ${ge && ge.kind !== "waiting" ? "bad" : "wait"}">${esc(ge?.text || "Finding you…")}</span>`);
     if (S.mode !== "ct") chips.push(S.etdErr ? `<span class="chip bad">BART: ${esc(S.etdErr)}</span>` : S.etdAt ? `<span class="chip ok">BART live · ${ago(S.etdAt)}</span>` : `<span class="chip wait">BART loading…</span>`);
     if (S.mode !== "bart") chips.push(!S.key511 ? `<span class="chip wait">Caltrain off · add a 511 key</span>` : S.ctErr ? `<span class="chip bad">Caltrain: ${esc(S.ctErr)}</span>` : S.vehAt ? `<span class="chip ok">Caltrain live · ${ago(S.vehAt)}</span>` : `<span class="chip wait">Caltrain loading…</span>`);
     $("#status").innerHTML = chips.join("");
+    const help = $("#geohelp");
+    if (!cur && ge && (ge.kind === "blocked" || ge.kind === "unavailable")) {
+      help.hidden = false;
+      help.innerHTML = `<p><strong>${ge.kind === "blocked" ? "Firefox is refusing location without asking." : "Firefox asked Android for a location and got none."}</strong></p>
+        <ul>${ge.kind === "blocked"
+          ? `<li>Android Settings → Apps → Firefox → Permissions → Location: set to <em>Allow only while using the app</em>, with <em>Use precise location</em> on.</li>
+             <li>In Firefox, tap the icon left of the address → clear the Location permission for this site.</li>`
+          : `<li>Check that Location is on in Android's quick settings.</li>
+             <li>With Google Location Accuracy off, location comes from GPS only, which can take a minute and may not work away from a window.</li>`}</ul>
+        <button class="btn primary" id="geoRetry" type="button">Try location again</button>`;
+      $("#geoRetry").addEventListener("click", () => startGeo(true));
+    } else help.hidden = true;
 
     const r = S.lastResult;
     const card = $("#result");
