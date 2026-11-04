@@ -261,7 +261,7 @@
         top = bart.candidates.reduce((a, b) => (Math.abs(etaOf(b) - S.lock.eta) < Math.abs(etaOf(a) - S.lock.eta) ? b : a));
         S.lock.eta = etaOf(top);
       }
-      const name = (c) => `${titleCase(c.route.color)} to ${S.bart.stations[c.route.destination]?.name || c.route.destination}`;
+      const name = (c) => `${titleCase(c.route.color)} to ${bartDestName(c.destAbbr || c.route.destination)}`;
       const nextName = (c) => S.bart.stations[c.route.stations[c.nextIdx]]?.name || "next stop";
       const why = (c) => {
         if (c.dirScore < top.dirScore) return "Opposite direction";
@@ -272,7 +272,7 @@
       const stops = TI.bartStops(top, { ...S.bart, etd: S.etd }).map((s) => ({ key: s.abbr, name: s.name, time: S.etdAt + s.minutes * 60e3, estimated: s.estimated }));
       return {
         sys: "bart", ident: { sys: "bart", routeId: top.route.routeID }, fix: cur, direction: bart.direction, stops,
-        title: `${titleCase(top.route.color)} line to ${S.bart.stations[top.route.destination]?.name || top.route.destination}`,
+        title: `${titleCase(top.route.color)} line to ${bartDestName(top.destAbbr || top.route.destination)}`,
         sub: [top.cars ? `${top.cars}-car train` : null, top.atStation ? "Stopped at station" : null].filter(Boolean).join(" · "),
         color: top.route.hexcolor, plausible: top.plausible,
         lockKey: { sys: "bart", routeId: top.route.routeID, eta: etaOf(top) },
@@ -333,11 +333,12 @@
     const best = ests.length ? ests.reduce((x, y) => (Math.abs(S.etdAt + y.minutes * 60e3 - L.eta) < Math.abs(S.etdAt + x.minutes * 60e3 - L.eta) ? y : x)) : null;
     const minutes = best ? best.minutes : Math.max(0, (L.eta - S.etdAt) / 60e3);
     L.eta = S.etdAt + minutes * 60e3;
-    const cand = { route: r, nextIdx: idx, minutesToNext: minutes };
+    if (best?.destAbbr) L.destAbbr = best.destAbbr;
+    const cand = { route: r, nextIdx: idx, minutesToNext: minutes, destAbbr: L.destAbbr };
     const stops = TI.bartStops(cand, { ...S.bart, etd: S.etd }).map((s) => ({ key: s.abbr, name: s.name, time: S.etdAt + s.minutes * 60e3, estimated: s.estimated || !best }));
     return {
       sys: "bart", ident: { sys: "bart", routeId: r.routeID }, fix: cur, direction: "known", manual: true, stops,
-      title: `${titleCase(r.color)} line to ${bartDestName(r.destination)}`,
+      title: `${titleCase(r.color)} line to ${bartDestName(L.destAbbr || r.destination)}`,
       sub: [best?.cars ? `${best.cars}-car train` : null, "Picked by hand"].filter(Boolean).join(" · "),
       color: r.hexcolor, plausible: true, alts: [],
     };
@@ -462,9 +463,9 @@
       !(mine && r.hexcolor === mine.hexcolor && r.direction !== mine.direction));
   }
 
-  function bartLegStops(route, abbr, minutes) {
+  function bartLegStops(route, abbr, minutes, destAbbr) {
     const idx = route.stations.indexOf(abbr);
-    return TI.bartStops({ route, nextIdx: idx, minutesToNext: minutes }, { ...S.bart, etd: S.etd })
+    return TI.bartStops({ route, nextIdx: idx, minutesToNext: minutes, destAbbr }, { ...S.bart, etd: S.etd })
       .slice(1).map((s) => ({ key: s.abbr, name: s.name, time: S.etdAt + s.minutes * 60e3, estimated: s.estimated }));
   }
 
@@ -518,8 +519,8 @@
       if (!ests.length) return null;
       const best = ests.reduce((a, b) => (Math.abs(S.etdAt + b.minutes * 60e3 - leg.eta) < Math.abs(S.etdAt + a.minutes * 60e3 - leg.eta) ? b : a));
       leg.eta = S.etdAt + best.minutes * 60e3;
-      return { ident: { sys: "bart", routeId: r.routeID }, color: r.hexcolor, title: `${titleCase(r.color)} to ${bartDestName(r.destination)}`,
-        depart: leg.eta, stops: bartLegStops(r, leg.at, best.minutes) };
+      return { ident: { sys: "bart", routeId: r.routeID }, color: r.hexcolor, title: `${titleCase(r.color)} to ${bartDestName(best.destAbbr || r.destination)}`,
+        depart: leg.eta, stops: bartLegStops(r, leg.at, best.minutes, best.destAbbr) };
     }
     const list = caltrainStops(leg.train, (S.vehicles || []).find((x) => x.train === leg.train));
     const name = leg.at.slice(3);

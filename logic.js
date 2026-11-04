@@ -136,7 +136,7 @@
       ests.slice(0, opts.ranks ?? 2).forEach((e, rank) => {
         cands.push({
           route: x.route, nextIdx, atStation, offTrack: seg.d, rank, dirScore,
-          minutesToNext: e.minutes, cars: e.cars,
+          minutesToNext: e.minutes, cars: e.cars, destAbbr: e.destAbbr,
           plausible: e.minutes <= expectMin + 6,
         });
       });
@@ -148,12 +148,16 @@
   }
 
   // Arrival chain for a chosen BART candidate. Returns [{abbr, name, minutes, estimated}]
+  // Stops at the train's own destination (cand.destAbbr, from the live estimate): a line's
+  // station list can run past where a given train ends, e.g. Yellow trains that end at SFO.
   function bartStops(cand, data) {
     const cfg = cand.route.stations;
     const out = [];
     let prev = cand.minutesToNext;
     out.push({ abbr: cfg[cand.nextIdx], name: data.stations[cfg[cand.nextIdx]]?.name, minutes: prev, estimated: false });
-    for (let j = cand.nextIdx + 1; j < cfg.length; j++) {
+    const endIdx = cfg.indexOf(cand.destAbbr);
+    const last = endIdx > cand.nextIdx ? endIdx : endIdx === cand.nextIdx ? cand.nextIdx : cfg.length - 1;
+    for (let j = cand.nextIdx + 1; j <= last; j++) {
       const abbr = cfg[j];
       const ests = etdFor(data.etd, abbr, cand.route).filter((e) => e.minutes >= prev);
       const a = data.stations[cfg[j - 1]], b = data.stations[abbr];
