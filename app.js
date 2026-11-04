@@ -286,14 +286,12 @@
     }
     if (sys === "ct" && ct?.candidates.length) {
       const v = ct.candidates[0];
-      let calls = v.calls || [];
-      if (calls.length < 2 && S.visits?.[v.train]) calls = S.visits[v.train];
-      const stops = calls.filter((c) => c.time > Date.now() - 60e3).map((c) => ({ key: "ct:" + c.name, name: c.name, time: c.time, estimated: false }));
+      const stops = caltrainStops(v.train, v);
       const dirWord = v.dir === "N" ? "Northbound" : v.dir === "S" ? "Southbound" : "";
       return {
         sys: "ct", ident: { sys: "ct", train: v.train }, fix: cur, direction: ct.direction, stops, vehicle: v,
         title: `Caltrain ${v.train}`,
-        sub: [dirWord, v.line, v.dest ? `to ${TI.cleanStop(v.dest)}` : null].filter(Boolean).join(" · "),
+        sub: [dirWord, v.line, (v.dest || S.visits?.[v.train]?.dest) ? `to ${TI.cleanStop(v.dest || S.visits[v.train].dest)}` : null].filter(Boolean).join(" · "),
         color: "#c8102e", plausible: v.d < 1000,
         posAge: v.recordedAt && v.posScore <= v.etaScore ? Math.round((Date.now() - v.recordedAt) / 1000) : null,
         lockKey: { sys: "ct", train: v.train },
@@ -345,9 +343,27 @@
     };
   }
 
+  // A Caltrain's remaining stops. 511's position feed and stop-prediction feed each carry only
+  // some of them, so merge both; if the list still stops short of the train's destination,
+  // add the destination with an estimated time.
   function caltrainStops(train, v) {
-    let calls = v?.calls?.length >= 2 ? v.calls : S.visits?.[train] || v?.calls || [];
-    return calls.filter((c) => c.time > Date.now() - 60e3).map((c) => ({ key: "ct:" + c.name, name: c.name, time: c.time, estimated: false }));
+    const byName = new Map();
+    for (const c of v?.calls || []) if (isFinite(c.time)) byName.set(c.name, c.time);
+    const visits = S.visits?.[train] || [];
+    for (const c of visits) byName.set(c.name, c.time); // stop predictions are fetched more often
+    const out = [...byName].map(([name, time]) => ({ key: "ct:" + name, name, time, estimated: false }))
+      .filter((c) => c.time > Date.now() - 60e3).sort((a, b) => a.time - b.time);
+    const dest = v?.dest || visits.dest;
+    const last = out[out.length - 1];
+    if (dest && last && last.name !== dest && !byName.has(dest)) {
+      const L = S.ctStops?.[last.name], Dst = S.ctStops?.[dest];
+      const prev = out[out.length - 2], P = prev && S.ctStops?.[prev.name];
+      let speed = 18;
+      if (P && L && last.time > prev.time) speed = Math.max(10, Math.min(30, TI.dist(P, L) / ((last.time - prev.time) / 1000)));
+      const secs = L && Dst ? TI.dist(L, Dst) * 1.15 / speed + 60 : null; // track is a bit longer than a straight line
+      out.push({ key: "ct:" + dest, name: dest, time: secs ? last.time + secs * 1000 : null, estimated: true, noTime: !secs });
+    }
+    return out;
   }
 
   // Every Caltrain we know about, from position reports or live stop predictions (511 sometimes sends only one).
@@ -505,13 +521,12 @@
       return { ident: { sys: "bart", routeId: r.routeID }, color: r.hexcolor, title: `${titleCase(r.color)} to ${bartDestName(r.destination)}`,
         depart: leg.eta, stops: bartLegStops(r, leg.at, best.minutes) };
     }
-    const list = S.visits?.[leg.train];
+    const list = caltrainStops(leg.train, (S.vehicles || []).find((x) => x.train === leg.train));
     const name = leg.at.slice(3);
-    const i = list ? list.findIndex((s) => s.name === name) : -1;
+    const i = list.findIndex((s) => s.name === name);
     if (i < 0) return null;
     leg.eta = list[i].time;
-    return { ident: { sys: "ct", train: leg.train }, color: "#c8102e", title: `Caltrain ${leg.train}`, depart: leg.eta,
-      stops: list.slice(i + 1).map((s) => ({ key: "ct:" + s.name, name: s.name, time: s.time, estimated: false })) };
+    return { ident: { sys: "ct", train: leg.train }, color: "#c8102e", title: `Caltrain ${leg.train}`, depart: leg.eta, stops: list.slice(i + 1) };
   }
 
   const sameTrain = (a, b) => a && b && a.sys === b.sys && (a.sys === "bart" ? a.routeId === b.routeId : a.train === b.train);
@@ -641,7 +656,7 @@
             <span>${esc(s.name)}${xfer ? ` <span class="tag">${s.key === "MLBR" ? "Caltrain" : s.key === "ct:Millbrae" ? "BART" : "Transfer"}</span>` : ""}</span>
             ${isNext ? `<small>Next stop</small>` : isChange ? `<small>Get off here</small>` : ""}
           </button>
-          <span class="when"><b>${s.estimated ? "~" : ""}${clock(s.time)}</b><small>${s.estimated ? "est. " : ""}${inMin(s.time)}</small></span>
+          <span class="when">${s.noTime ? `<small>no time yet</small>` : `<b>${s.estimated ? "~" : ""}${clock(s.time)}</b><small>${s.estimated ? "est. " : ""}${inMin(s.time)}</small>`}</span>
         </li>${open ? pickerHtml(si, s) : ""}`;
       }).join("");
       const change = seg.change ? `

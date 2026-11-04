@@ -205,7 +205,7 @@
           train: v.FramedVehicleJourneyRef?.DatedVehicleJourneyRef || v.VehicleRef || "?",
           line: v.PublishedLineName || v.LineRef || "",
           dir: (v.DirectionRef || "").toString().toUpperCase().startsWith("N") ? "N" : (v.DirectionRef ? "S" : ""),
-          dest: v.DestinationName || "",
+          dest: cleanStop(typeof v.DestinationName === "string" ? v.DestinationName : arr(v.DestinationName)[0]?.value || ""),
           recordedAt: act.RecordedAtTime ? parseTime(act.RecordedAtTime) : null,
           calls: [v.MonitoredCall, ...arr(v.OnwardCalls?.OnwardCall)]
             .filter(Boolean)
@@ -219,7 +219,7 @@
 
   function stopVisitsFrom511(j) {
     const del = arr(j?.ServiceDelivery?.StopMonitoringDelivery ?? j?.Siri?.ServiceDelivery?.StopMonitoringDelivery);
-    const byTrain = {};
+    const byTrain = {}, dests = {};
     for (const d of del) {
       for (const v of arr(d.MonitoredStopVisit)) {
         const mvj = v.MonitoredVehicleJourney || {};
@@ -228,11 +228,13 @@
         const time = parseTime(c.ExpectedArrivalTime, c.ExpectedDepartureTime, c.AimedArrivalTime, c.AimedDepartureTime);
         if (!ref || !isFinite(time)) continue;
         (byTrain[ref] ||= []).push({ name: cleanStop(c.StopPointName), time });
+        if (mvj.DestinationName) (dests[ref] ||= cleanStop(arr(mvj.DestinationName)[0]?.value ?? arr(mvj.DestinationName)[0]));
       }
     }
     for (const k in byTrain) {
       const seen = new Set();
       byTrain[k] = byTrain[k].sort((a, b) => a.time - b.time).filter((s) => !seen.has(s.name) && seen.add(s.name));
+      if (dests[k]) byTrain[k].dest = dests[k];
     }
     return byTrain;
   }
