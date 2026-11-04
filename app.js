@@ -553,6 +553,8 @@
   async function openPicker(seg, key, tArr) {
     S.picker = { seg, key, tArr };
     render();
+    // The list opens under the station row, which may be near the bottom of the screen.
+    $(".picker")?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
     // Caltrain connections need stop predictions for every train.
     if (ctNameOf(key) && S.key511 && Date.now() - S.visitsAt > 60e3) { await refreshVisits(true); render(); }
   }
@@ -584,6 +586,7 @@
     chips.push(cur ? `<span class="chip ok">GPS ±${Math.round(cur.acc || 0)} m · ${ago(cur.at)}</span>` : `<span class="chip ${ge && ge.kind !== "waiting" ? "bad" : "wait"}">${esc(ge?.text || "Finding you…")}</span>`);
     if (S.mode !== "ct") chips.push(S.etdErr ? `<span class="chip bad">BART: ${esc(S.etdErr)}</span>` : S.etdAt ? `<span class="chip ok">BART live · ${ago(S.etdAt)}</span>` : `<span class="chip wait">BART loading…</span>`);
     if (S.mode !== "bart") chips.push(!S.key511 ? `<span class="chip wait">Caltrain off · add a 511 key</span>` : S.ctErr ? `<span class="chip bad">Caltrain: ${esc(S.ctErr)}</span>` : S.vehAt ? `<span class="chip ok">Caltrain live · ${ago(S.vehAt)}</span>` : `<span class="chip wait">Caltrain loading…</span>`);
+    if (S.appErr) chips.push(`<span class="chip bad">App error: ${esc(S.appErr)}</span>`);
     $("#status").innerHTML = chips.join("");
     const help = $("#geohelp");
     if (!cur && ge && (ge.kind === "blocked" || ge.kind === "unavailable")) {
@@ -631,6 +634,13 @@
     const segs = itinerary(r);
     const pk = S.picker;
     const pickerHtml = (si, s) => {
+      try { return pickerInner(si, s); }
+      catch (e) {
+        reportError(e);
+        return `<li class="picker"><div><p class="warn">Couldn't list connections at ${esc(s.name)}: ${esc(e.message)}</p><div class="actions"><button class="btn" id="pickcancel" type="button">Close</button></div></div></li>`;
+      }
+    };
+    const pickerInner = (si, s) => {
       const opts = transferOptions(s.key, s.time, segs[si].ident, pk.all);
       const more = !pk.all;
       const loadingCt = ctNameOf(s.key) && S.key511 && !S.visits;
@@ -733,6 +743,16 @@
     lines.push(`511 requests this hour: ${used}/60`);
     el.textContent = lines.join("\n");
   }
+
+  // Surface unexpected errors in the status bar instead of failing silently.
+  function reportError(e) {
+    const msg = (e && (e.message || e.reason?.message || String(e.reason || e))) || "unknown";
+    if (S.appErr === msg) return;
+    S.appErr = msg;
+    try { $("#status").insertAdjacentHTML("beforeend", `<span class="chip bad">App error: ${esc(msg)}</span>`); } catch {}
+  }
+  window.addEventListener("error", (e) => reportError(e.error || e));
+  window.addEventListener("unhandledrejection", (e) => reportError(e.reason || e));
 
   // ---------- Wire up ----------
   $("#go").addEventListener("click", start);
